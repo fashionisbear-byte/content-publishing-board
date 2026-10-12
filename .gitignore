@@ -1,0 +1,14 @@
+node_modules/
+.test-output/
+.env
+.env.*
+private/
+backups/
+exports/
+私有备份/
+*.local.json
+
+# Public releases contain production files only.
+tests/
+.playwright-cli/
+.codex-temp/

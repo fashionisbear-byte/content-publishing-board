@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>内容发布看板 · 飞书协作版</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2300805a'/%3E%3Cpath d='M8 8h16v16H8zM8 16h16M16 8v16' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
+  <style>/* APP_CSS */</style>
+</head>
+<body>
+  <main class="container">
+    <header class="top-navbar">
+      <div class="brand"><span class="brand-icon" aria-hidden="true">▦</span><div><h1>内容发布看板</h1><p id="sync-status" role="status">正在检查飞书连接…</p><p id="business-status" class="muted" role="status"></p></div></div>
+      <div class="top-actions"><button id="expand" class="btn">展开看板</button><button id="business-button" class="btn hidden">飞书表格</button><button id="retry" class="btn warning hidden">核对上次保存</button><button id="stop-pending" class="btn warning hidden">停止重试并核对</button><button id="refresh" class="btn">刷新</button><button id="data-button" class="btn">数据与接入</button></div>
+    </header>
+    <div id="notice" class="notice hidden" role="alert"></div>
+    <section id="onboarding" class="section-box onboarding">
+      <span class="eyebrow">飞书多维表格 · 团队共用一份记录</span>
+      <h2 id="onboarding-title">连接团队的发布记录</h2>
+      <p id="onboarding-copy">在飞书插件中使用，数据保存在当前多维表格。</p>
+      <ol><li>创建一个飞书多维表格，添加此网页为自定义插件。</li><li>在插件中创建共享数据表，管理员配置「提交序号」自动编号后重连，再填写发布计划。</li><li>把多维表格分享给同事，授予相应的查看或添加记录权限。</li></ol>
+      <div class="actions"><button id="connect" class="btn btn-primary">重新连接飞书</button><button id="setup-table" class="btn btn-primary hidden">创建共享数据表</button><button id="demo" class="btn">体验本地演示</button></div>
+
+    </section>
+    <div id="workspace" class="hidden">
+      <nav class="tabs" aria-label="看板模块"><button data-tab="board" class="active">执行看板</button><button data-tab="plan">发布计划</button><button data-tab="history">执行记录</button></nav>
+      <section id="tab-board">
+        <div id="cycle-overview" class="cycle-overview section-box"></div>
+        <div class="section-header"><div><h2>当天执行</h2></div><div class="date-wrap"><label for="date">日期</label><input type="date" id="date"><button id="today" class="btn btn-sm">回到今天</button><button id="all-entries" class="btn btn-sm">当天登记明细</button><button id="report" class="btn btn-sm">复制日报</button></div></div>
+        <div id="day-plan-update" class="notice hidden">当天任务与计划不同。<button id="apply-day-plan" class="btn" data-write>同步最新计划到今天</button></div>
+        <p id="detached-note" class="notice hidden"></p>
+        <div id="removed-day" class="notice hidden"></div>
+        <div id="metrics" class="metric-grid"></div>
+        <div class="section-box"><div class="section-header"><h3>账号进度</h3><div class="filters"><label>账号负责人 <select id="owner-filter"><option value="">全部</option></select></label><label>店铺 <select id="shop-filter"><option value="">全部</option></select></label><label>状态 <select id="status-filter"><option value="">全部</option><option value="pending">未达标</option><option value="complete">已达标</option><option value="paused">暂停</option></select></label></div></div>
+          <div id="quick-save-bar" class="quick-save-bar hidden"><div><strong>有未保存的登记</strong><p id="quick-save-note" class="muted" role="status"></p></div><button id="quick-discard" type="button" class="btn">放弃修改</button><button id="quick-save" type="button" class="btn btn-primary">保存登记</button></div>
+          <div id="member-controls" class="member-controls hidden"><button id="add-member" class="btn btn-sm">添加飞书成员</button><button id="refresh-members" class="btn btn-sm">刷新成员</button><button id="manage-members" class="text-button">管理协作成员</button><span id="member-status" class="muted"></span></div>
+          <div class="table-scroll board-scroll"><table class="board-table"><thead><tr><th>账号 / 店铺</th><th>负责人</th><th>产品</th><th>视频 / 每天目标</th><th>图文 / 每天目标</th><th>当天状态</th><th>操作</th></tr></thead><tbody id="board-rows"></tbody></table></div>
+        </div>
+        <div class="section-box contribution-box"><div class="section-header"><h3>实际完成汇总</h3></div><div id="contributions" class="people-grid"></div></div>
+      </section>
+      <section id="tab-plan" class="hidden">
+        <form id="plan-form" class="section-box">
+          <div class="section-header"><div><h2>周期发布计划</h2></div><div class="actions"><button id="delete-plan" type="button" class="btn danger hidden" data-write>删除此周期</button><button id="new-cycle" type="button" class="btn">＋ 新建周期</button></div></div>
+          <div id="plan-member-controls" class="member-controls hidden"><button id="plan-add-member" type="button" class="btn btn-sm">添加飞书负责人</button><button id="plan-refresh-members" type="button" class="btn btn-sm">刷新成员</button><button id="plan-manage-members" type="button" class="text-button">管理成员</button><span id="plan-member-status" class="muted"></span></div>
+          <div id="catalog-controls" class="member-controls hidden"><button type="button" class="btn btn-sm" data-catalog-open="accounts">管理账号资料</button><button type="button" class="btn btn-sm" data-catalog-open="shops">管理店铺资料</button><button type="button" class="btn btn-sm" data-catalog-open="products">管理产品资料</button><button id="catalog-refresh" type="button" class="btn btn-sm">刷新资料选项</button><span id="catalog-status" class="muted" role="status"></span></div>
+
+          <div class="cycle-form"><label>周期名称（可选）<input id="plan-title" maxlength="80" placeholder="填写这份计划的名称"></label><label>开始日期<input type="date" id="plan-date" required></label><label>周期长度<select id="plan-duration"><option value="7">7 天</option><option value="14">14 天</option><option value="30">30 天</option><option value="custom">自定义</option></select></label><label>结束日期（含当天）<input type="date" id="plan-end" required></label></div>
+          <p id="cycle-form-note" class="muted"></p>
+          <div class="table-scroll"><table class="plan-table"><thead><tr><th>账号名称</th><th>店铺</th><th>负责人</th><th>发布产品</th><th>每天视频目标</th><th>每天图文目标</th><th>操作</th></tr></thead><tbody id="plan-rows"></tbody></table></div>
+          <div class="section-footer"><button id="add-account" type="button" class="btn">＋ 添加账号</button><p id="plan-total" class="muted"></p><button id="plan-reset" type="button" class="btn">重新载入</button><button type="submit" class="btn btn-primary" id="save-plan">保存发布计划</button></div>
+          <p id="plan-note" class="muted"></p>
+        </form>
+        <div class="section-box contribution-box"><h3>计划周期</h3><div id="versions" class="version-list"></div></div>
+      </section>
+      <section id="tab-history" class="hidden">
+        <div class="section-box"><div class="section-header"><div><h2>每天执行记录</h2></div><div class="date-wrap"><label>从 <input type="date" id="history-from"></label><label>到 <input type="date" id="history-to"></label><button id="csv" class="btn btn-sm">导出 CSV</button></div></div>
+        <div class="table-scroll"><table><thead><tr><th>日期 / 周期</th><th>视频 / 目标</th><th>图文 / 目标</th><th>达标账号</th><th>尚缺</th><th>登记情况</th><th>操作</th></tr></thead><tbody id="history-rows"></tbody></table></div></div>
+      </section>
+    </div>
+  </main>
+  <dialog id="publish-dialog"><form id="publish-form"><div class="dialog-header"><h2 id="publish-title">登记发布</h2><button type="button" data-close aria-label="关闭">×</button></div><label id="publish-person-row"><span id="publish-person-label">代做人</span><span id="publish-person-control"></span></label><div class="two-col"><label>视频数量<input name="video" type="number" min="0" max="1000000" step="1" value="0" required></label><label>图文数量<input name="photo" type="number" min="0" max="1000000" step="1" value="0" required></label></div><label>备注（可选）<textarea name="note" maxlength="2000" rows="2" placeholder="作品链接或内容说明"></textarea></label><div class="dialog-actions"><button type="button" class="btn" data-close>取消</button><button id="publish-submit" type="submit" class="btn btn-primary">保存代做登记</button></div></form></dialog>
+  <dialog id="entries-dialog" class="wide"><div class="dialog-header"><h2 id="entries-title">发布明细</h2><button data-close aria-label="关闭">×</button></div><div id="entries"></div></dialog>
+  <dialog id="delete-dialog"><div class="dialog-header"><h2 id="delete-title">确认删除</h2><button type="button" data-close aria-label="关闭">×</button></div><p id="delete-detail"></p><div class="dialog-actions"><button type="button" class="btn" data-close>取消</button><button type="button" id="delete-confirm" class="btn danger" data-write>确认删除并同步飞书</button></div></dialog>
+  <dialog id="quick-leave-dialog"><div class="dialog-header"><h2>登记还没有保存</h2><button type="button" data-close aria-label="关闭">×</button></div><div class="dialog-actions"><button id="quick-stay" type="button" class="btn">继续编辑</button><button id="quick-leave-discard" type="button" class="btn">放弃后切换</button><button id="quick-leave-save" type="button" class="btn btn-primary">保存后切换</button></div></dialog>
+  <dialog id="data-dialog" class="wide"><div class="dialog-header"><h2>数据与接入</h2><button data-close aria-label="关闭">×</button></div><p id="storage-detail"></p><div class="data-actions"><button id="backup" class="btn">导出完整 JSON 备份</button><button id="import" class="btn">选择旧记录 JSON</button><input id="import-file" type="file" accept="application/json,.json" hidden></div><div id="import-preview" class="hidden"><h3>导入预览</h3><p id="import-summary"></p><label id="import-plan-option"><input id="import-plans" type="checkbox"> 同时导入旧发布计划（仅共享计划为空时可用）</label><p id="import-progress" role="status"></p><button id="import-confirm" class="btn btn-primary">确认追加导入</button><button id="import-abandon" class="btn">放弃剩余导入</button></div><button id="reconnect-data" class="btn">连接飞书正式数据</button></dialog>
+  <dialog id="business-dialog"><div class="dialog-header"><h2>查看飞书业务表</h2><button data-close aria-label="关闭">×</button></div><div class="business-links"><button class="btn" data-business="cycles">计划进度</button><button class="btn" data-business="plans">发布计划</button><button class="btn" data-business="daily">每日进度</button><button class="btn" data-business="entries">发布明细</button></div><button id="business-sync" class="btn">立即整理业务表</button></dialog>
+  <dialog id="report-dialog" class="wide"><div class="dialog-header"><h2>当日发布日报</h2><button data-close aria-label="关闭">×</button></div><textarea id="report-text" rows="15" readonly></textarea><button id="copy-report" class="btn btn-primary">复制到剪贴板</button></dialog>
+  <datalist id="people-list"></datalist><div id="toast" class="toast hidden" role="status"></div>
+  <script>/* APP_JS */</script>
+</body>
+</html>
