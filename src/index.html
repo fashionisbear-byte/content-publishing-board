@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
+  <meta name="board-release" content="20261013-v7">
   <title>内容发布看板 · 飞书协作版</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2300805a'/%3E%3Cpath d='M8 8h16v16H8zM8 16h16M16 8v16' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
   <style>/* APP_CSS */</style>
@@ -33,7 +34,7 @@
         <div id="removed-day" class="notice hidden"></div>
         <div id="metrics" class="metric-grid"></div>
         <div class="section-box"><div class="section-header"><h3>账号进度</h3><div class="filters"><label>账号负责人 <select id="owner-filter"><option value="">全部</option></select></label><label>店铺 <select id="shop-filter"><option value="">全部</option></select></label><label>状态 <select id="status-filter"><option value="">全部</option><option value="pending">未达标</option><option value="complete">已达标</option><option value="paused">暂停</option></select></label></div></div>
-          <div id="quick-save-bar" class="quick-save-bar hidden"><div><strong>有未保存的登记</strong><p id="quick-save-note" class="muted" role="status"></p></div><button id="quick-discard" type="button" class="btn">放弃修改</button><button id="quick-save" type="button" class="btn btn-primary">保存登记</button></div>
+          <div id="quick-save-bar" class="quick-save-bar hidden"><div><strong>有未保存的登记</strong><p id="quick-save-note" class="muted" role="status"></p></div><button id="quick-review" type="button" class="btn warning hidden">核对暂存</button><button id="quick-discard" type="button" class="btn">放弃修改</button><button id="quick-save" type="button" class="btn btn-primary">保存登记</button></div>
           <div id="member-controls" class="member-controls hidden"><button id="add-member" class="btn btn-sm">添加飞书成员</button><button id="refresh-members" class="btn btn-sm">刷新成员</button><button id="manage-members" class="text-button">管理协作成员</button><span id="member-status" class="muted"></span></div>
           <div class="table-scroll board-scroll"><table class="board-table"><thead><tr><th>账号 / 店铺</th><th>负责人</th><th>产品</th><th>视频 / 每天目标</th><th>图文 / 每天目标</th><th>当天状态</th><th>操作</th></tr></thead><tbody id="board-rows"></tbody></table></div>
         </div>
@@ -59,7 +60,7 @@
       </section>
     </div>
   </main>
-  <dialog id="publish-dialog"><form id="publish-form"><div class="dialog-header"><h2 id="publish-title">登记发布</h2><button type="button" data-close aria-label="关闭">×</button></div><label id="publish-person-row"><span id="publish-person-label">代做人</span><span id="publish-person-control"></span></label><div class="two-col"><label>视频数量<input name="video" type="number" min="0" max="1000000" step="1" value="0" required></label><label>图文数量<input name="photo" type="number" min="0" max="1000000" step="1" value="0" required></label></div><label>备注（可选）<textarea name="note" maxlength="2000" rows="2" placeholder="作品链接或内容说明"></textarea></label><div class="dialog-actions"><button type="button" class="btn" data-close>取消</button><button id="publish-submit" type="submit" class="btn btn-primary">保存代做登记</button></div></form></dialog>
+  <dialog id="publish-dialog"><form id="publish-form"><div class="dialog-header"><h2 id="publish-title">登记发布</h2><button type="button" data-close aria-label="关闭">×</button></div><label id="publish-person-row"><span id="publish-person-label">代做人</span><span id="publish-person-control"></span></label><div class="two-col"><label>视频数量<input name="video" type="number" min="0" max="1000000" step="1" value="0" required></label><label>图文数量<input name="photo" type="number" min="0" max="1000000" step="1" value="0" required></label></div><label>备注（可选）<textarea name="note" maxlength="2000" rows="2" placeholder="作品链接或内容说明"></textarea></label><div id="entry-arrangement" class="hidden"><label><input id="correct-arrangement" type="checkbox"> 纠正这条登记的账号或安排</label><div id="entry-arrangement-fields" hidden><label>登记账号<select id="entry-account" aria-label="纠错账号"></select></label><div id="entry-details"></div></div></div><div class="dialog-actions"><button type="button" class="btn" data-close>取消</button><button id="publish-submit" type="submit" class="btn btn-primary">保存代做登记</button></div></form></dialog>
   <dialog id="entries-dialog" class="wide"><div class="dialog-header"><h2 id="entries-title">发布明细</h2><button data-close aria-label="关闭">×</button></div><div id="entries"></div></dialog>
   <dialog id="delete-dialog"><div class="dialog-header"><h2 id="delete-title">确认删除</h2><button type="button" data-close aria-label="关闭">×</button></div><p id="delete-detail"></p><div class="dialog-actions"><button type="button" class="btn" data-close>取消</button><button type="button" id="delete-confirm" class="btn danger" data-write>确认删除并同步飞书</button></div></dialog>
   <dialog id="quick-leave-dialog"><div class="dialog-header"><h2>登记还没有保存</h2><button type="button" data-close aria-label="关闭">×</button></div><div class="dialog-actions"><button id="quick-stay" type="button" class="btn">继续编辑</button><button id="quick-leave-discard" type="button" class="btn">放弃后切换</button><button id="quick-leave-save" type="button" class="btn btn-primary">保存后切换</button></div></dialog>
@@ -67,6 +68,7 @@
   <dialog id="business-dialog"><div class="dialog-header"><h2>查看飞书业务表</h2><button data-close aria-label="关闭">×</button></div><div class="business-links"><button class="btn" data-business="cycles">计划进度</button><button class="btn" data-business="plans">发布计划</button><button class="btn" data-business="daily">每日进度</button><button class="btn" data-business="entries">发布明细</button></div><button id="business-sync" class="btn">立即整理业务表</button></dialog>
   <dialog id="report-dialog" class="wide"><div class="dialog-header"><h2>当日发布日报</h2><button data-close aria-label="关闭">×</button></div><textarea id="report-text" rows="15" readonly></textarea><button id="copy-report" class="btn btn-primary">复制到剪贴板</button></dialog>
   <datalist id="people-list"></datalist><div id="toast" class="toast hidden" role="status"></div>
+  <dialog id="quick-review-dialog" class="wide"><form id="quick-review-form"><div class="dialog-header"><h2>核对暂存</h2><button type="button" data-close aria-label="关闭">×</button></div><p class="muted">原输入保留。确认采用当前安排；负数会更正下方账号当前的具体登记。核对后仍需点击保存。</p><div id="quick-review-rows"></div><div class="dialog-actions"><button type="button" class="btn" data-close>继续保留原输入</button><button type="submit" class="btn btn-primary">按当前安排保留这些变化</button></div></form></dialog>
   <script>/* APP_JS */</script>
 </body>
 </html>

@@ -10,7 +10,7 @@ export const SCHEMA = [
   ['person', '实际完成人', 'Text'], ['video', '视频数量', 'Number'], ['photo', '图文数量', 'Number'],
   ['at', '登记时间', 'Text'], ['actor', '操作者ID', 'Text'], ['seq', '操作顺序', 'Number'], ['payload', '完整内容', 'Text']
 ];
-const KIND_LABELS = { plan: '发布计划', publish: '发布登记', batch:'统一保存登记', day: '当天调整', void: '撤销登记', seed: '历史导入', reduce: '快捷减1', stop: '停止重试', delete:'确认删除', edit:'修改登记' };
+const KIND_LABELS = { protocol:'版本启用', plan: '发布计划', publish: '发布登记', batch:'统一保存登记', day: '当天调整', void: '撤销登记', seed: '历史导入', reduce: '快捷减1', stop: '停止重试', delete:'确认删除', edit:'修改登记' };
 export function actionColumns(action) {
   const a = validateAction(action), p = a.payload, row = p.account ?? p.snapshot?.find(r => r.id === p.accountId);
   return { id: a.id, kind: KIND_LABELS[a.kind], date: a.date, accountId: p.accountId ?? '', account: row?.name ?? (a.kind === 'plan' ? p.accounts.length + '个账号' : ''), owner: row?.owner ?? '', person: p.person ?? '', video: p.video ?? 0, photo: p.photo ?? 0, at: a.at, actor: a.actor, seq: a.seq, payload: JSON.stringify(a) };

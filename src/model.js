@@ -48,14 +48,22 @@ function execution(e) {
 }
 export const personKey = e => e.personId ? 'member:' + e.personId : 'name:' + e.person;
 export function validateAction(raw) {
-  if (!raw || ![1, 2, 3, 4, 5, 6].includes(raw.v) || !['plan', 'publish', 'batch', 'day', 'void', 'seed', 'reduce', 'stop', 'delete', 'edit'].includes(raw.kind)) throw Error('共享记录格式或版本无效，请刷新到新版看板');
+  if (!raw || ![1, 2, 3, 4, 5, 6, 7].includes(raw.v) || !['protocol', 'plan', 'publish', 'batch', 'day', 'void', 'seed', 'reduce', 'stop', 'delete', 'edit'].includes(raw.kind)) throw Error('共享记录格式或版本无效，请刷新到新版看板');
   const a = { v: raw.v, id: id(raw.id), seq: integer(raw.seq, '顺序', Number.MAX_SAFE_INTEGER), at: text(raw.at, '登记时间', 40), actor: text(raw.actor, '操作者', 180), kind: raw.kind, date: raw.date };
   if (a.id.length > 80) throw Error('操作标识过长');
   if (a.seq < 1 || !validDate(a.date) || !Number.isFinite(Date.parse(a.at))) throw Error('记录日期或顺序无效');
   const p = raw.payload;
   if (!p || typeof p !== 'object') throw Error('记录内容缺失');
+  if(a.kind==='protocol'){if(a.v!==7||p.minimumVersion!==7)throw Error('版本启用记录无效');a.payload={minimumVersion:7};}
   if (a.kind === 'plan') {
     a.payload = { accounts: config(p.accounts), expected: p.expected === null ? null : id(p.expected) };
+    if (a.v >= 7) {
+      if (!p.endDate) throw Error('请填写计划的开始日期和结束日期');
+      cycleDays(a.date,p.endDate);
+      const effectiveDate = p.effectiveDate ?? p.applyDate ?? a.date;
+      if (!validDate(effectiveDate) || effectiveDate < a.date || effectiveDate > p.endDate) throw Error('计划生效日期不在周期内');
+      a.payload.effectiveDate = effectiveDate;
+    }
     if(p.cleanupRemoved!=null){if(a.v<4||typeof p.cleanupRemoved!=='boolean')throw Error('账号删除标记无效');a.payload.cleanupRemoved=p.cleanupRemoved;}
     if (p.endDate != null) {
       cycleDays(a.date, p.endDate);
@@ -92,13 +100,29 @@ export function validateAction(raw) {
       if(!c.video&&!c.photo)throw Error('没有待保存数量');
       return {accountId,video:c.video,photo:c.photo,person:text(c.person,'负责人'),...(c.personId?{personId:id(c.personId)}:{})};
     })};
+    if (a.v >= 7) {
+      if (!Array.isArray(p.reductions) || p.reductions.length > 20000) throw Error('减少数量需要绑定原登记');
+      const targets = new Set();
+      a.payload.reductions = p.reductions.map(r => {
+        const target = id(r.target), accountId = id(r.accountId), expected = execution(r.expected);
+        if (targets.has(target)) throw Error('减少登记重复'); targets.add(target);
+        return {target, accountId, expected, ...(r.expectedAccount?{expectedAccount:config([r.expectedAccount])[0]}:{}), video:integer(r.video,'减少视频'), photo:integer(r.photo,'减少图文')};
+      });
+      for (const c of a.payload.changes) for (const k of ['video','photo']) if (a.payload.reductions.filter(r=>r.accountId===c.accountId).reduce((s,r)=>s+r[k],0)!==Math.max(0,-c[k])) throw Error('减少登记与待保存数量不符');
+      if (a.payload.reductions.some(r=>!a.payload.changes.some(c=>c.accountId===r.accountId)||!r.video&&!r.photo||r.video>r.expected.video||r.photo>r.expected.photo)) throw Error('减少登记范围无效');
+    }
   }
+  if (a.v >= 7 && ['publish','batch'].includes(a.kind)) a.payload.cycleId = p.cycleId == null ? null : id(p.cycleId);
   if (a.kind === 'void') a.payload = { target: id(p.target), reason: text(p.reason, '撤销原因', 500) };
   if (a.kind === 'edit') {
     if (a.v < 6) throw Error('请刷新新版后修改登记');
     const e = execution(p);
     if (e.video + e.photo < 1) throw Error('请至少保留1条发布；整次有误请删除记录');
     a.payload = { target: id(p.target), expected: execution(p.expected), ...e };
+    if (a.v>=7) {
+      if (p.expectedAccount) a.payload.expectedAccount=config([p.expectedAccount])[0];
+      if (p.account) a.payload.account=config([p.account])[0];
+    }
   }
   if (a.kind === 'delete') {
     if (a.v < 4 || !['publication','plan','day-account','restore-day-account'].includes(p.type) || a.v < 5 && p.type.includes('day-account')) throw Error('删除记录类型无效');
@@ -106,6 +130,7 @@ export function validateAction(raw) {
     if (p.type === 'publication' && p.expected != null) {
       if (a.v < 6) throw Error('请刷新新版后确认删除');
       a.payload.expected = execution(p.expected);
+      if(a.v>=7&&p.expectedAccount)a.payload.expectedAccount=config([p.expectedAccount])[0];
     }
     if (p.type === 'plan') {
       a.payload.expected = id(p.expected);
@@ -144,7 +169,12 @@ export function validateAction(raw) {
   return a;
 }
 export function makeAction(board, kind, date, payload, actor = 'demo', key = crypto.randomUUID()) {
-  return validateAction({ v: 6, id: key, seq: board.seq + 1, at: new Date().toISOString(), actor, kind, date, payload });
+  if (kind === 'batch' && payload.reductions == null) payload = batchPayload(board,date,payload.changes,payload);
+  if (['batch','publish'].includes(kind) && payload.cycleId === undefined) payload = {...payload,cycleId:cycleIdentity(board,date)};
+  if ((kind==='edit'||kind==='delete'&&payload.type==='publication')&&payload.expectedAccount===undefined) {
+    const entry=board.publications.get(payload.target);if(entry)payload={...payload,expectedAccount:effectivePublication(board,entry).account};
+  }
+  return validateAction({ v: 7, id: key, seq: board.seq + 1, at: new Date().toISOString(), actor, kind, date, payload });
 }
 function validateHeads(raw) {
   if (raw === null) return null;
@@ -153,7 +183,62 @@ function validateHeads(raw) {
 }
 export const dayHeads = (board,date) => board.days.has(date) ? [...board.days.get(date).heads].sort((a,b)=>a[0].localeCompare(b[0])) : null;
 function validateEntries(raw){if(!Array.isArray(raw)||raw.length>20000)throw Error('当天登记版本无效');return raw.map(r=>{if(!Array.isArray(r)||r.length!==4)throw Error('当天登记版本无效');return [id(r[0]),id(r[1]),integer(r[2],'视频数量'),integer(r[3],'图文数量')];}).sort((a,b)=>a[0].localeCompare(b[0]));}
-export const dayEntries=(board,date)=>[...board.publications.values()].filter(e=>e.date===date&&!board.voids.has(e.id)).map(e=>{const c=effectivePublication(board,e);return [e.id,e.accountId,c.video,c.photo];}).sort((a,b)=>a[0].localeCompare(b[0]));
+export const dayEntries=(board,date)=>[...board.publications.values()].filter(e=>e.date===date&&!board.voids.has(e.id)).map(e=>{const c=effectivePublication(board,e);return [e.id,c.accountId,c.video,c.photo];}).sort((a,b)=>a[0].localeCompare(b[0]));
+export const cycleIdentity = (board,date) => {
+  const plan = planAt(board,date).plan;
+  return plan ? (board.planVersions.get(plan.date)?.[0]?.id ?? plan.id) : null;
+};
+// Display labels may change while a referenced account / member remains the same entity.
+const reference = (row,key,ref) => row[ref] ? 'id:'+row[ref] : 'text:'+(row[key]??'');
+export const taskIdentity = row => row ? JSON.stringify([row.id,reference(row,'name','accountRef'),reference(row,'shop','shopRef'),reference(row,'owner','ownerId'),reference(row,'product','productRef'),row.video,row.photo,row.note]) : null;
+export const batchBasis = (board,date) => [...board.publications.values()].filter(e=>e.date===date&&!board.voids.has(e.id)&&!board.deletedEntries.has(e.id)).map(e=>{const c=effectivePublication(board,e);return {target:e.id,accountId:c.accountId,expected:publicationState(board,e),expectedAccount:c.account};});
+export function batchPayload(board,date,changes,base={}) {
+  const basis=base.basis??batchBasis(board,date), reductions=[];
+  for (const c of changes) {
+    const left={video:Math.max(0,-c.video),photo:Math.max(0,-c.photo)};
+    for (const r of [...basis].reverse().filter(r=>r.accountId===c.accountId)) {
+      const video=Math.min(left.video,r.expected.video),photo=Math.min(left.photo,r.expected.photo);
+      if(video||photo)reductions.push({...clone(r),video,photo});left.video-=video;left.photo-=photo;
+      if(!left.video&&!left.photo)break;
+    }
+    if(left.video||left.photo)throw Error('减少数量超过暂存时已保存量，请在明细中核对');
+  }
+  return {snapshot:base.snapshot??config(dayAt(board,date)),expectedHeads:base.expectedHeads??dayHeads(board,date),expectedEntries:base.expectedEntries??dayEntries(board,date),cycleId:base.cycleId===undefined?cycleIdentity(board,date):base.cycleId,changes:clone(changes),reductions};
+}
+export function batchConflicts(board,date,payload) {
+  const rows=dayAt(board,date), issues=[];
+  if(payload.cycleId!==cycleIdentity(board,date))issues.push('计划周期已变化');
+  for(const c of payload.changes) {
+    const before=payload.snapshot.find(r=>r.id===c.accountId),current=rows.find(r=>r.id===c.accountId);
+    if(!current||(c.video>0||c.photo>0)&&taskIdentity(before)!==taskIdentity(current))issues.push((before?.name??c.accountId)+'的账号、安排或负责人已变化');
+    else if((c.video>0||c.photo>0)&&personKey({person:before.owner,personId:before.ownerId})!==personKey(c))issues.push(before.name+'的完成归属与负责人不符');
+  }
+  for(const r of payload.reductions) {
+    const current=board.publications.get(r.target);
+    if(!current||current.date!==date||effectivePublication(board,current).accountId!==r.accountId||board.voids.has(r.target)||board.deletedEntries.has(r.target)||JSON.stringify(publicationState(board,current))!==JSON.stringify(r.expected)||JSON.stringify(effectivePublication(board,current).account)!==JSON.stringify(r.expectedAccount))issues.push((payload.snapshot.find(x=>x.id===r.accountId)?.name??r.accountId)+'的待减少登记已修改或删除（'+r.target+'）');
+  }
+  return [...new Set(issues)];
+}
+function scheduledPlan(board,plan,date) {
+  const versions=board.planVersions.get(plan.date)??[plan];
+  if(!versions.some(p=>p.v>=7))return plan; // Legacy history keeps its prior interpretation.
+  const first=versions.findIndex(p=>p.v>=7), baseline=first>0?versions[first-1]:null;
+  return versions.slice(first).filter(p=>p.payload.effectiveDate<=date).at(-1)??baseline;
+}
+export function legacyPlanRisks(board,plan,effectiveDate) {
+  if(!plan||plan.v>=7)return [];
+  const versions=board.planVersions.get(plan.date)??[plan],risks=[];
+  for(let i=1;i<versions.length;i++)if(JSON.stringify(versions[i-1].payload.accounts)!==JSON.stringify(versions[i].payload.accounts)&&(versions[i].payload.applyDate??today(new Date(versions[i].at)))>plan.date)risks.push('旧计划版本 '+versions[i].id);
+  for(const [d,saved] of board.days)if(d>=plan.date&&d<effectiveDate&&d<=plan.payload.endDate&&saved.rows.some(r=>{const a=plan.payload.accounts.find(a=>a.id===r.id);return a&&(a.video!==r.video||a.photo!==r.photo);} ))risks.push(d+'的旧单日目标');
+  return risks;
+}
+export function cycleAccounts(board,plan) {
+  if(!plan)return [];
+  if(plan.v<7)return clone(plan.payload.accounts);
+  const byId=new Map();
+  for(let d=plan.date;d<=plan.payload.endDate;d=addDays(d,1))for(const r of scheduledPlan(board,plan,d)?.payload.accounts??[])byId.set(r.id,clone(r));
+  return [...byId.values()];
+}
 // Receipt numbers are read from the host's read-only AutoNumber field, never from action JSON.
 export const actionIdentity = a => JSON.stringify(validateAction(a));
 export function planAt(board, date, readLegacy = false) {
@@ -161,7 +246,8 @@ export function planAt(board, date, readLegacy = false) {
   const next = [...board.plans.values()].filter(p => p.date > date).sort((a, b) => a.date.localeCompare(b.date))[0];
   const until = p?.payload.endDate ?? null;
   const state = !p ? next ? 'upcoming' : 'empty' : board.cancelledPlans.has(p.date) ? 'deleted' : !until ? 'needs-period' : date > until ? 'ended' : 'active';
-  return { accounts: clone(p && (state === 'active' || readLegacy && !until && state!=='deleted') ? p.payload.accounts : []), token: p ? 'plan:' + p.id : 'plan:empty', from: p?.date ?? null, until, title: p?.payload.title ?? '', state, plan: p ?? null, next: next ?? null };
+  const stage=p?scheduledPlan(board,p,date):null;
+  return { accounts: clone(stage && (state === 'active' || readLegacy && !until && state!=='deleted') ? stage.payload.accounts : []), token: stage ? 'plan:' + stage.id : 'plan:empty', from: p?.date ?? null, until, title: p?.payload.title ?? '', state, plan: p ?? null, next: next ?? null };
 }
 export function dayAt(board, date, readLegacy = false) {
   const saved = board.days.get(date);
@@ -187,11 +273,20 @@ export function executionDates(board, at = today()) {
 }
 export function accountCycleSummary(board, plan, account) {
   if (!plan?.payload.endDate || board.cancelledPlans.has(plan.date)) return null;
-  const days=cycleDays(plan.date,plan.payload.endDate),targetVideo=account.video*days,targetPhoto=account.photo*days;
+  const days=cycleDays(plan.date,plan.payload.endDate);
+  let targetVideo=account.video*days,targetPhoto=account.photo*days;
+  if(plan.v>=7){
+    targetVideo=0;targetPhoto=0;
+    for(let d=plan.date;d<=plan.payload.endDate;d=addDays(d,1)){
+      const stage=scheduledPlan(board,plan,d),saved=board.days.get(d);
+      const r=(saved&&stage&&saved.planId===stage.id?saved.rows:[]).find(r=>r.id===account.id)??stage?.payload.accounts.find(r=>r.id===account.id);
+      targetVideo+=r?.video??0;targetPhoto+=r?.photo??0;
+    }
+  }
   let video=0,photo=0;
   for (const entry of board.publications.values()) {
-    if(entry.accountId!==account.id||entry.date<plan.date||entry.date>plan.payload.endDate||board.voids.has(entry.id)||board.deletedEntries.has(entry.id))continue;
-    const effective=effectivePublication(board,entry);video+=effective.video;photo+=effective.photo;
+    if(entry.date<plan.date||entry.date>plan.payload.endDate||board.voids.has(entry.id)||board.deletedEntries.has(entry.id))continue;
+    const effective=effectivePublication(board,entry);if(effective.accountId!==account.id)continue;video+=effective.video;photo+=effective.photo;
   }
   const target=targetVideo+targetPhoto,fulfilled=Math.min(video,targetVideo)+Math.min(photo,targetPhoto);
   return {days,video,photo,targetVideo,targetPhoto,target,fulfilled,missingVideo:Math.max(0,targetVideo-video),missingPhoto:Math.max(0,targetPhoto-photo),pct:target?Math.round(fulfilled/target*100):100};
@@ -199,21 +294,23 @@ export function accountCycleSummary(board, plan, account) {
 export function cycleSummary(board, plan) {
   if (!plan?.payload.endDate || board.cancelledPlans.has(plan.date)) return null;
   const sum={days:cycleDays(plan.date,plan.payload.endDate),recordedDays:0,video:0,photo:0,targetVideo:0,targetPhoto:0,fulfilled:0,missingVideo:0,missingPhoto:0};
-  for(const account of plan.payload.accounts){const s=accountCycleSummary(board,plan,account);for(const key of ['video','photo','targetVideo','targetPhoto','fulfilled','missingVideo','missingPhoto'])sum[key]+=s[key];}
-  const ids=new Set(plan.payload.accounts.map(r=>r.id)),dates=new Set();
-  for(const entry of board.publications.values())if(ids.has(entry.accountId)&&entry.date>=plan.date&&entry.date<=plan.payload.endDate&&!board.voids.has(entry.id)&&!board.deletedEntries.has(entry.id)){const effective=effectivePublication(board,entry);if(effective.video+effective.photo>0)dates.add(entry.date);}
+  const accounts=cycleAccounts(board,plan);
+  for(const account of accounts){const s=accountCycleSummary(board,plan,account);for(const key of ['video','photo','targetVideo','targetPhoto','fulfilled','missingVideo','missingPhoto'])sum[key]+=s[key];}
+  const ids=new Set(accounts.map(r=>r.id)),dates=new Set();
+  for(const entry of board.publications.values())if(entry.date>=plan.date&&entry.date<=plan.payload.endDate&&!board.voids.has(entry.id)&&!board.deletedEntries.has(entry.id)){const effective=effectivePublication(board,entry);if(ids.has(effective.accountId)&&effective.video+effective.photo>0)dates.add(entry.date);}
   sum.recordedDays=dates.size;sum.target=sum.targetVideo+sum.targetPhoto;sum.pct=sum.target?Math.round(sum.fulfilled/sum.target*100):100;return sum;
 }
-export function hasRegistration(board,date,accountId=null){const ids=new Set((board.days.get(date)?.rows??planAt(board,date).accounts).map(r=>r.id));return [...board.publications.values()].some(e=>e.date===date&&ids.has(e.accountId)&&(!accountId||e.accountId===accountId)&&!board.voids.has(e.id)&&effectivePublication(board,e).video+effectivePublication(board,e).photo>0);}
+export function hasRegistration(board,date,accountId=null){const ids=new Set((board.days.get(date)?.rows??planAt(board,date).accounts).map(r=>r.id));return [...board.publications.values()].some(e=>{const c=effectivePublication(board,e);return e.date===date&&ids.has(c.accountId)&&(!accountId||c.accountId===accountId)&&!board.voids.has(e.id)&&c.video+c.photo>0;});}
 export function effectivePublication(board, e) {
   const updated = board.edits.get(e.id) ?? e;
   const reduced = board.reductions.get(e.id) ?? { video: 0, photo: 0 };
-  return { ...clone(e), personId: updated.personId, ...execution(updated), video: updated.video - reduced.video, photo: updated.photo - reduced.photo };
+  const account=updated.account??e.account;
+  return { ...clone(e), account,accountId:account?.id??e.accountId,personId: updated.personId, ...execution(updated), video: updated.video - reduced.video, photo: updated.photo - reduced.photo };
 }
 export const publicationState = (board, e) => execution(effectivePublication(board, e));
 export const delegatedPublication = e => e.personId && e.account?.ownerId ? e.personId !== e.account.ownerId : !!e.account && e.person !== e.account.owner;
 export function project(rawActions) {
-  const board = { seq: 0, actions: [], plans: new Map(), cancelledPlans:new Map(), deletedDayAccounts:new Set(), deletedEntries:new Set(), deletedPlanKeys:new Set(), deletedDailyKeys:new Set(), planHead: null, days: new Map(), publications: new Map(), edits: new Map(), voids: new Set(), reductions: new Map(), stops: new Map(), restored: new Map(), restoreFailures: new Set(), accepted: new Set(), conflicts: [] };
+  const board = { seq: 0, actions: [], plans: new Map(), planVersions:new Map(), cancelledPlans:new Map(), deletedDayAccounts:new Set(), deletedEntries:new Set(), deletedPlanKeys:new Set(), deletedDailyKeys:new Set(), planHead: null, days: new Map(), publications: new Map(), edits: new Map(), voids: new Set(), reductions: new Map(), stops: new Map(), restored: new Map(), restoreFailures: new Set(), accepted: new Set(), conflicts: [] };
   const unique = new Map();
   for (const raw of rawActions) {
     const a = validateAction(raw), old = unique.get(a.id);
@@ -228,6 +325,7 @@ export function project(rawActions) {
   const updateBoundary = Math.min(...committed.filter(a=>a.v>=4).map(a=>a.serverOrder));
   const dailyBoundary = Math.min(...committed.filter(a=>a.v>=5).map(a=>a.serverOrder));
   const correctionBoundary = Math.min(...committed.filter(a=>a.v>=6).map(a=>a.serverOrder));
+  const scopedBoundary = Math.min(...committed.filter(a=>a.v>=7).map(a=>a.serverOrder));
   const legacy = a => a.v === 1 && (a.serverOrder === undefined || a.serverOrder < boundary);
   const lastOrder = Math.max(0, ...committed.map(a => a.serverOrder));
   const sorted = all.sort((a, b) => {
@@ -256,6 +354,7 @@ export function project(rawActions) {
     if(a.v<4 && a.serverOrder!==undefined && a.serverOrder>=updateBoundary){conflict('旧版请求在新版启用后到达，未生效；请刷新后重新保存');continue;}
     if(a.v<5 && a.serverOrder!==undefined && a.serverOrder>=dailyBoundary){conflict('旧版请求在当天删除版启用后到达，未生效；请刷新后重新保存');continue;}
     if(a.v<6 && a.serverOrder!==undefined && a.serverOrder>=correctionBoundary){conflict('旧版请求在登记纠错版启用后到达，未生效；请刷新后重新保存');continue;}
+    if(a.v<7 && !a.restore && a.serverOrder!==undefined && a.serverOrder>=scopedBoundary){conflict('旧版请求在协作规则升级后到达，未生效；保留原输入，请刷新新版并核对明细');continue;}
     const freeze = rows => {
       if (!board.days.has(a.date)) board.days.set(a.date, { rows: clone(rows), planId:planAt(board,a.date,true).plan?.id??null, heads: new Map(rows.map(r => [r.id, 'snapshot:' + a.id + '/' + r.id])) });
       return board.days.get(a.date);
@@ -273,9 +372,23 @@ export function project(rawActions) {
         if (overlaps) { conflict('计划周期与另一份计划重叠，请调整开始或结束日期'); continue; }
       }
       const previous=board.plans.get(a.date), remaining=new Set(p.accounts.map(r=>r.id));
-      if(previous&&p.cleanupRemoved)for(const prior of board.actions.filter(x=>x.kind==='plan'&&x.date===a.date&&board.accepted.has(x.id)))for(const r of prior.payload.accounts)if(!remaining.has(r.id))board.deletedPlanKeys.add(prior.id+'/'+r.id);
+      if(a.v>=7&&previous){
+        const risks=legacyPlanRisks(board,previous,p.effectiveDate);if(risks.length){conflict('旧周期目标需要先核对迁移：'+risks.join('；')+'。原周期和输入保留，未重造过去目标');continue;}
+        const versions=board.planVersions.get(a.date)??[previous],latest=versions.at(-1);
+        if(p.effectiveDate<(latest.payload.effectiveDate??a.date)){conflict('计划调整不能改写此前已生效的阶段');continue;}
+        if(p.effectiveDate>a.date&&p.endDate!==previous.payload.endDate){conflict('周期已经开始，日常调整保留原结束日期；请建立新周期');continue;}
+        if(p.accounts.some(r=>{const old=versions.flatMap(v=>v.payload.accounts).find(x=>x.id===r.id);return old&&reference(old,'name','accountRef')!==reference(r,'name','accountRef')&&(old.accountRef||r.accountRef);})){conflict('更换真实账号必须使用新账号标识，旧账号数量保留');continue;}
+      }
+      if(a.v>=7&&!previous&&p.effectiveDate!==a.date){conflict('新周期从开始日期生效，不能补造开始前的安排');continue;}
+      if(a.v<7&&previous&&p.cleanupRemoved)for(const prior of board.actions.filter(x=>x.kind==='plan'&&x.date===a.date&&board.accepted.has(x.id)))for(const r of prior.payload.accounts)if(!remaining.has(r.id))board.deletedPlanKeys.add(prior.id+'/'+r.id);
       board.cancelledPlans.delete(a.date);board.plans.set(a.date, a);
+      const versions=board.planVersions.get(a.date)??[];versions.push(a);board.planVersions.set(a.date,versions);
       board.planHead = a.id;
+      if(a.v>=7){
+        for(const [d,saved] of board.days)if(d>=p.effectiveDate&&d<=p.endDate&&d>=a.date){
+          saved.rows=clone(p.accounts).filter(r=>!board.deletedDayAccounts.has(d+'/'+r.id));saved.planId=a.id;saved.heads=new Map(saved.rows.map(r=>[r.id,'plan:'+a.id+'/'+r.id]));
+        }
+      }
       if(p.applyDate){
         const old=board.days.get(p.applyDate),applied=(p.applyAccounts??p.accounts).filter(r=>!board.deletedDayAccounts.has(p.applyDate+'/'+r.id)),activeIds=new Set(applied.map(r=>r.id));
         if(old)for(const r of old.rows)if(!activeIds.has(r.id))board.deletedDailyKeys.add(p.applyDate+'/'+r.id);
@@ -290,19 +403,23 @@ export function project(rawActions) {
         board.publications.set(key, { id: key, date: a.date, accountId: r.id, account:config([r])[0], ...e, at: a.at, actor: a.actor, imported: true });
       }));
     } else if (a.kind === 'publish') {
-      if (a.v >= 2 && !a.restore && !board.days.has(a.date) && JSON.stringify(p.snapshot) !== JSON.stringify(config(dayAt(board, a.date, a.v < 3)))) {
+      if(a.v>=7&&!a.restore&&(p.cycleId!==cycleIdentity(board,a.date)||taskIdentity(p.snapshot.find(r=>r.id===p.accountId))!==taskIdentity(dayAt(board,a.date).find(r=>r.id===p.accountId)))){conflict('该账号的计划或负责人已变化，代做输入保留，请核对安排');continue;}
+      if (a.v >= 2 && a.v < 7 && !a.restore && !board.days.has(a.date) && JSON.stringify(p.snapshot) !== JSON.stringify(config(dayAt(board, a.date, a.v < 3)))) {
         conflict('首次登记的计划快照已过期，请刷新后重新登记'); continue;
       }
-      const d = freeze(p.snapshot);
+      const d = freeze(a.v>=7?config(dayAt(board,a.date)):p.snapshot);
       if (!d.rows.some(r => r.id === p.accountId)) { conflict('该账号不在已保存的当天计划内'); continue; }
-      board.publications.set(a.id, { id: a.id, date: a.date, accountId: p.accountId, account:clone(p.snapshot.find(r=>r.id===p.accountId)), ...execution(p), at: a.at, actor: a.actor });
+      const cycle=planAt(board,a.date).plan;
+      board.publications.set(a.id, { id: a.id, date: a.date, accountId: p.accountId, account:clone(p.snapshot.find(r=>r.id===p.accountId)), ...(a.v>=7&&cycle?{cycle:{date:cycle.date,payload:{endDate:cycle.payload.endDate,title:cycle.payload.title}}}:{}), ...execution(p), at: a.at, actor: a.actor });
     } else if(a.kind==='batch'){
       const rows=dayAt(board,a.date);
-      if(JSON.stringify(config(rows))!==JSON.stringify(p.snapshot)||JSON.stringify(dayHeads(board,a.date))!==JSON.stringify(p.expectedHeads)||JSON.stringify(dayEntries(board,a.date))!==JSON.stringify(p.expectedEntries)){conflict('当天任务或登记已被其他人修改，本次待保存登记未生效，请核对后重新登记');continue;}
+      if(a.v>=7){const issues=batchConflicts(board,a.date,p);if(issues.length){conflict(issues.join('；')+'。本次未生效，原输入保留');continue;}}
+      else if(JSON.stringify(config(rows))!==JSON.stringify(p.snapshot)||JSON.stringify(dayHeads(board,a.date))!==JSON.stringify(p.expectedHeads)||JSON.stringify(dayEntries(board,a.date))!==JSON.stringify(p.expectedEntries)){conflict('当天任务或登记已被其他人修改，本次待保存登记未生效，请核对后重新登记');continue;}
       if(p.changes.some(c=>{const row=rows.find(r=>r.id===c.accountId),n=row&&counts(row);return !row||n.video+c.video<0||n.photo+c.photo<0;})){conflict('减少数量超过已登记数量，整批未生效');continue;}
-      freeze(p.snapshot);
+      freeze(a.v>=7?config(rows):p.snapshot);
+      if(a.v>=7)for(const r of p.reductions){const reduced=board.reductions.get(r.target)??{video:0,photo:0};board.reductions.set(r.target,{video:reduced.video+r.video,photo:reduced.photo+r.photo});const n=effectivePublication(board,board.publications.get(r.target));if(!n.video&&!n.photo){board.voids.add(r.target);board.deletedEntries.add(r.target);}}
       for(const change of p.changes){
-        for(const content of ['video','photo'])if(change[content]<0){
+        for(const content of ['video','photo'])if(a.v<7&&change[content]<0){
           let remaining=-change[content];
           for(const entry of [...board.publications.values()].reverse().filter(e=>e.date===a.date&&e.accountId===change.accountId&&!board.voids.has(e.id))){
             const amount=Math.min(remaining,effectivePublication(board,entry)[content]);if(!amount)continue;
@@ -311,14 +428,15 @@ export function project(rawActions) {
             if(!remaining)break;
           }
         }
-        if(change.video>0||change.photo>0){const key=a.id+'/'+change.accountId;board.publications.set(key,{id:key,date:a.date,accountId:change.accountId,account:clone(p.snapshot.find(r=>r.id===change.accountId)),person:change.person,...(change.personId?{personId:change.personId}:{}),video:Math.max(0,change.video),photo:Math.max(0,change.photo),note:'',at:a.at,actor:a.actor});}
+        if(change.video>0||change.photo>0){const key=a.id+'/'+change.accountId,cycle=planAt(board,a.date).plan;board.publications.set(key,{id:key,date:a.date,accountId:change.accountId,account:clone(p.snapshot.find(r=>r.id===change.accountId)),...(a.v>=7&&cycle?{cycle:{date:cycle.date,payload:{endDate:cycle.payload.endDate,title:cycle.payload.title}}}:{}),person:change.person,...(change.personId?{personId:change.personId}:{}),video:Math.max(0,change.video),photo:Math.max(0,change.photo),note:'',at:a.at,actor:a.actor});}
       }
     } else if (a.kind === 'edit') {
       const target = board.publications.get(p.target);
-      if (!target || target.date !== a.date || board.voids.has(p.target) || board.deletedEntries.has(p.target) || JSON.stringify(publicationState(board,target)) !== JSON.stringify(p.expected)) {
+      if (!target || target.date !== a.date || board.voids.has(p.target) || board.deletedEntries.has(p.target) || JSON.stringify(publicationState(board,target)) !== JSON.stringify(p.expected) || a.v>=7&&JSON.stringify(effectivePublication(board,target).account)!==JSON.stringify(p.expectedAccount)) {
         conflict('这条登记已被修改或删除，请重新打开明细后核对'); continue;
       }
-      board.edits.set(p.target, execution(p));
+      if(p.account){const current=effectivePublication(board,target);if(p.account.id!==current.accountId&&!dayAt(board,a.date).some(r=>r.id===p.account.id&&reference(r,'name','accountRef')===reference(p.account,'name','accountRef'))){conflict('纠错账号不在该日期的任务内，请核对历史归属');continue;}}
+      board.edits.set(p.target, {...execution(p),account:clone(p.account??effectivePublication(board,target).account)});
       board.reductions.delete(p.target);
     } else if (a.kind === 'day') {
       const row = dayAt(board, a.date, a.v < 3 || !!a.restore).find(r => r.id === p.accountId);
@@ -334,11 +452,11 @@ export function project(rawActions) {
       const removeEntries=entries=>{for(const entry of entries){board.voids.add(entry.id);board.deletedEntries.add(entry.id);}};
       if(p.type==='publication'){
         const target=board.publications.get(p.target);if(!target||target.date!==a.date){conflict('删除对象不存在或日期不符');continue;}
-        if(p.expected&&!board.deletedEntries.has(p.target)&&JSON.stringify(publicationState(board,target))!==JSON.stringify(p.expected)){conflict('这条登记已被修改，请重新打开明细后确认删除');continue;}
+        if(p.expected&&!board.deletedEntries.has(p.target)&&(JSON.stringify(publicationState(board,target))!==JSON.stringify(p.expected)||a.v>=7&&JSON.stringify(effectivePublication(board,target).account)!==JSON.stringify(p.expectedAccount))){conflict('这条登记已被修改，请重新打开明细后确认删除');continue;}
         board.voids.add(p.target);board.deletedEntries.add(p.target);
       }else if(p.type==='day-account'||p.type==='restore-day-account'){
         const key=a.date+'/'+p.target,restoring=p.type==='restore-day-account',rows=dayAt(board,a.date),cycleRow=planAt(board,a.date).accounts.find(r=>r.id===p.target);
-        const entries=[...board.publications.values()].filter(e=>e.date===a.date&&e.accountId===p.target&&!board.deletedEntries.has(e.id));
+        const entries=[...board.publications.values()].filter(e=>e.date===a.date&&effectivePublication(board,e).accountId===p.target&&!board.deletedEntries.has(e.id));
         if(JSON.stringify(dayHeads(board,a.date))!==JSON.stringify(p.expectedHeads)||(restoring?(!board.deletedDayAccounts.has(key)||!cycleRow):(!rows.some(r=>r.id===p.target)||p.entries&&JSON.stringify(entries.map(e=>e.id).sort())!==JSON.stringify(p.entries)))){conflict('当天任务或登记已变化，请刷新后重新确认');continue;}
         const d=freeze(config(rows));
         if(restoring){board.deletedDayAccounts.delete(key);board.deletedDailyKeys.delete(key);d.rows.push(clone(cycleRow));d.heads.set(p.target,a.id);}
@@ -389,7 +507,7 @@ export function people(rows) {
   for (const r of rows) for (const e of r.executions) {
     const key = personKey(e), person = map.get(key) ?? { person: e.person, ...(e.personId ? { personId: e.personId } : {}), video: 0, photo: 0, support: 0 };
     person.video += e.video; person.photo += e.photo;
-    if (e.personId && r.ownerId ? e.personId !== r.ownerId : e.person !== r.owner) person.support += e.video + e.photo;
+    if (delegatedPublication(e)) person.support += e.video + e.photo;
     map.set(key, person);
   }
   return [...map.values()].filter(p => p.video + p.photo > 0);
@@ -455,6 +573,8 @@ export function makeRestoreAction(incoming, index, after, current = project([]))
   if(payload.applyHeads)payload.applyHeads=payload.applyHeads.map(([account,head])=>[account,mapped(head)]);
   if(payload.expectedHeads)payload.expectedHeads=payload.expectedHeads.map(([account,head])=>[account,mapped(head)]);
   if(payload.expectedEntries)payload.expectedEntries=payload.expectedEntries.map(([entry,...rest])=>[mapped(entry),...rest]).sort((a,b)=>a[0].localeCompare(b[0]));
+  if(payload.cycleId)payload.cycleId=mapped(payload.cycleId);
+  if(payload.reductions)payload.reductions=payload.reductions.map(r=>({...r,target:mapped(r.target)}));
   if(payload.entries)payload.entries=payload.entries.map(mapped).sort();
   return validateAction({ ...original, v: Math.max(5, original.v), id: requestId, payload, restore: { jobId: incoming.jobId, sourceId: original.id, sourceIds: [original.id, ...priorSources], after, auditOnly: !source.accepted.has(original.id), reason: source.conflicts.find(c => c.id === original.id)?.reason ?? '' } });
 }

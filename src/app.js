@@ -1,4 +1,4 @@
-import { FORMAT, clone, today, config, validDate, addDays, cycleDays, cycleSummary, executionDates, hasRegistration, dayHeads, dayEntries, makeAction, project, planAt, dayAt, counts, stats, people, effectivePublication, publicationState, delegatedPublication, csvCell, report, migration, importPreview, makeRestoreAction } from './model.js';
+import { FORMAT, clone, today, config, validDate, addDays, cycleDays, cycleSummary, executionDates, hasRegistration, dayHeads, dayEntries, cycleIdentity, taskIdentity, batchBasis, batchPayload, batchConflicts, makeAction, project, planAt, dayAt, counts, stats, people, effectivePublication, publicationState, delegatedPublication, csvCell, report, migration, importPreview, makeRestoreAction } from './model.js';
 import { Controller, TABLE_NAME, createFeishuStore, createDemoStore } from './storage.js';
 import { boardRevision } from './business.js';
 
@@ -9,31 +9,41 @@ export function createApp(doc, win, loadSDK) {
   let editing = null, entriesAccount = null, incoming = null, toastTimer, pollTimer, offStore, refreshTimer, connecting = false, importing = false, connectionEpoch = 0;
   let registrationDirty = false;
   let deleteTarget = null;
-  let quickDraft = null, leaveQuick = null;
+  let quickDraft = null, leaveQuick = null, quickReview = null;
   const quickKey=()=> 'tiktok-board-quick-draft:'+store.scope;
-  const quickCurrent=()=>!quickDraft||JSON.stringify(quickDraft.snapshot)===JSON.stringify(config(dayAt(controller.board,quickDraft.date)))&&JSON.stringify(quickDraft.expectedHeads)===JSON.stringify(dayHeads(controller.board,quickDraft.date))&&JSON.stringify(quickDraft.expectedEntries)===JSON.stringify(dayEntries(controller.board,quickDraft.date));
-  function discardQuick(){win.localStorage.removeItem(quickKey());quickDraft=null;render();}
+  const quickIssues=()=>{if(!quickDraft)return [];if(quickDraft.requiresReview)return ['旧版暂存需要人工核对，未自动提交'];if(quickDraft.actionId&&controller.board.actions.some(a=>a.id===quickDraft.actionId)&&!controller.board.accepted.has(quickDraft.actionId))return ['上次请求已确认未生效，请核对暂存后重新保存'];try{return batchConflicts(controller.board,quickDraft.date,batchPayload(controller.board,quickDraft.date,quickDraft.changes,quickDraft));}catch(e){return [e.message];}};
+  const quickCurrent=()=>!quickIssues().length;
+  function persistQuick(){win.sessionStorage.setItem(quickKey(),JSON.stringify(quickDraft));}
+  function discardQuick(){win.sessionStorage.removeItem(quickKey());quickDraft=null;render();}
   function askQuick(next){if(!quickDraft)return false;leaveQuick=next;show($('quick-leave-dialog'));return true;}
   function stageQuantity(id,content,delta){
     writable();if(date>today())throw Error('未来日期仅查看');
-    if(!quickCurrent())throw Error('同一天的任务或登记已变化，请放弃暂存并按最新情况重新登记');
+    if(!quickCurrent())throw Error(quickIssues().join('；')+'。原输入保留，请点「核对暂存」');
     if(quickDraft&&quickDraft.date!==date)throw Error('请先保存另一日期的暂存登记');
     const r=row(id),selected=selectedPerson(r),member=selected.person?selected:{person:r.owner,...(r.ownerId?{personId:r.ownerId}:{})};if(delta>0&&!selected.person)throw Error('请先选择账号负责人');
-    const draft=clone(quickDraft??{date,snapshot:snapshot(),expectedHeads:dayHeads(controller.board,date),expectedEntries:dayEntries(controller.board,date),changes:[]});
+    const draft=clone(quickDraft??{v:7,date,snapshot:snapshot(),expectedHeads:dayHeads(controller.board,date),expectedEntries:dayEntries(controller.board,date),cycleId:cycleIdentity(controller.board,date),basis:batchBasis(controller.board,date),changes:[]});
     let change=draft.changes.find(c=>c.accountId===id);
     if(!change){change={accountId:id,...member,video:0,photo:0};draft.changes.push(change);}
     if(counts(r)[content]+change[content]+delta<0)throw Error('不能减少到0以下');
     change[content]+=delta;draft.changes=draft.changes.filter(c=>c.video||c.photo);
-    if(draft.changes.length){win.localStorage.setItem(quickKey(),JSON.stringify(draft));quickDraft=draft;}else{win.localStorage.removeItem(quickKey());quickDraft=null;}
+    if(draft.changes.length){quickDraft=draft;persistQuick();}else{win.sessionStorage.removeItem(quickKey());quickDraft=null;}
     renderBoard();renderStatus();
   }
   async function saveQuick(){
     if(!quickDraft)return;
     writable();const pending=clone(quickDraft);await controller.refresh();
-    if(!quickCurrent())throw Error('同一天的数据已变化；暂存仍保留，请核对最新登记后放弃并重新输入');
-    if(!quickDraft.actionId){quickDraft.actionId=crypto.randomUUID();win.localStorage.setItem(quickKey(),JSON.stringify(quickDraft));}
-    await save('batch',pending.date,{snapshot:pending.snapshot,expectedHeads:pending.expectedHeads,expectedEntries:pending.expectedEntries,changes:pending.changes},quickDraft.actionId);
+    if(quickDraft.actionId&&controller.board.accepted.has(quickDraft.actionId)){discardQuick();await finishBusiness();message('此暂存已保存，未重复登记');return;}
+    if(!quickCurrent())throw Error(quickIssues().join('；')+'。原输入保留，请点「核对暂存」');
+    if(!quickDraft.actionId){quickDraft.actionId=crypto.randomUUID();persistQuick();}
+    await save('batch',pending.date,batchPayload(controller.board,pending.date,pending.changes,pending),quickDraft.actionId);
     discardQuick();await finishBusiness();message(store.mode==='feishu'&&!businessMessage.includes('已更新')?'登记已保存；'+businessMessage:'登记已统一保存，进度和明细已更新');
+  }
+  async function reviewQuick(){
+    writable();if(!quickDraft)return;await controller.refresh();
+    if(quickDraft.actionId&&controller.board.accepted.has(quickDraft.actionId)){discardQuick();await finishBusiness();return;}
+    quickReview={date:quickDraft.date,snapshot:config(dayAt(controller.board,quickDraft.date)),basis:batchBasis(controller.board,quickDraft.date),cycleId:cycleIdentity(controller.board,quickDraft.date)};
+    $('quick-review-rows').innerHTML=quickDraft.changes.map(c=>{const old=quickDraft.snapshot.find(r=>r.id===c.accountId),now=quickReview.snapshot.find(r=>r.id===c.accountId),n=now?counts(dayAt(controller.board,quickDraft.date).find(r=>r.id===c.accountId)):{video:0,photo:0};return `<div class="review-row" data-account="${esc(c.accountId)}"><strong>${esc(old?.name??c.accountId)}</strong><p class="muted">原安排：${esc(old?.owner)} / ${esc(old?.product||'未设产品')} / ${esc(old?.shop)}<br>当前：${now?esc(now.owner+' / '+(now.product||'未设产品')+' / '+now.shop):'账号已移出任务，请将该项调整为0'} · 已保存视频${n.video} / 图文${n.photo}</p><div class="two-col"><label>视频变化<input data-delta="video" type="number" step="1" min="-1000000" max="1000000" value="${c.video}" required></label><label>图文变化<input data-delta="photo" type="number" step="1" min="-1000000" max="1000000" value="${c.photo}" required></label></div></div>`;}).join('');
+    show($('quick-review-dialog'));renderStatus();
   }
   let members = [], membersError = '', membersBusy = false;
   let memberRows = [], catalog = { accounts: [], shops: [], products: [] }, catalogError = '', catalogBusy = false;
@@ -90,7 +100,7 @@ export function createApp(doc, win, loadSDK) {
   }
   const selectedPerson = r => {
     if (!r) return {person:''};
-    if (store?.mode !== 'feishu') return {person:r.owner};
+    if (store?.mode !== 'feishu') return {person:r.owner,...(r.ownerId?{personId:r.ownerId}:{})};
     const named=members.filter(m=>m.person===r.owner);
     return members.find(m=>m.personId===r.ownerId) ?? (!r.ownerId && named.length===1 ? named[0] : {person:'',personId:''});
   };
@@ -172,8 +182,9 @@ export function createApp(doc, win, loadSDK) {
     $('add-member').disabled = membersBusy || disabled;
     $('refresh-members').disabled = membersBusy;
     $('quick-save-bar').classList.toggle('hidden',!quickDraft);
-    $('quick-save-note').textContent=quickDraft?(quickCurrent()?`${quickDraft.date} · ${quickDraft.changes.length}个账号待保存`:'同一天的共享数据已变化，下方显示最新已保存数量；暂存保留，请放弃后重新输入。'):'';
+    $('quick-save-note').textContent=quickDraft?(quickCurrent()?`${quickDraft.date} · ${quickDraft.changes.length}个账号待保存；汇总按已保存数量统计`:quickIssues().join('；')+'。暂存保留，请核对后继续。'):'';
     $('quick-save').disabled=disabled||!quickCurrent();$('quick-discard').disabled=!!controller?.busy;
+    $('quick-review').classList.toggle('hidden',!quickDraft||quickCurrent());$('quick-review').disabled=disabled;
     $('quick-leave-save').disabled=disabled||!quickCurrent();
     if(quickDraft)doc.querySelectorAll('[data-write]:not([data-step])').forEach(button=>button.disabled=true);
     if(quickDraft&&!quickCurrent())doc.querySelectorAll('[data-step]').forEach(button=>button.disabled=true);
@@ -193,15 +204,18 @@ export function createApp(doc, win, loadSDK) {
     });
   }
   function renderBoard() {
-    const b = controller.board, savedRows = dayAt(b, date), rows = savedRows.map(r=>{const change=quickDraft?.date===date&&quickCurrent()?quickDraft.changes.find(c=>c.accountId===r.id):null;return change?{...r,executions:[...r.executions,{person:r.owner,video:change.video,photo:change.photo}]}:r;}), s = stats(rows), p = planAt(b, date);
+    const focus=doc.activeElement?.dataset?.step?{...doc.activeElement.dataset}:null;
+    const b = controller.board, savedRows = dayAt(b, date), rows = savedRows, s = stats(savedRows), p = planAt(b, date);
+    const delta=k=>quickDraft?.date===date?quickDraft.changes.reduce((n,c)=>n+c[k],0):0;
+    const deltaLabel=k=>delta(k)?` · 待保存${delta(k)>0?'＋':'−'}${Math.abs(delta(k))}`:'';
     $('date').value = date;
     const period = p.plan, summary = cycleSummary(b, period);
     const stateLabel = { active: '执行中', ended: '已结束', deleted:'已删除', 'needs-period': '待设置周期', upcoming: '尚未开始', empty: '暂无计划' }[p.state];
     const periodTitle = p.title || (p.from ? p.from + ' 开始的计划' : '周期计划');
-    $('cycle-overview').innerHTML = `<div class="section-header"><div><span class="eyebrow">周期计划</span><h2>${esc(periodTitle)} <span class="badge ${p.state === 'active' ? 'complete' : 'paused'}">${stateLabel}</span></h2><p class="muted">${p.until ? `${p.from} — ${p.until} · 共${summary?.days ?? cycleDays(p.from,p.until)}天` : p.state === 'needs-period' ? '请补充结束日期。' : p.next ? `已安排${p.next.date} — ${p.next.payload.endDate || '待设置结束日期'}` : ''}</p></div><div class="actions">${p.state === 'needs-period' ? `<button class="btn btn-primary" data-configure-cycle="${p.from}">补充计划周期</button>` : `<button class="btn" data-next-cycle="${p.state==='deleted'?'':(p.from ?? '')}">${p.until && p.state!=='deleted' ? '复制为下一周期' : '创建周期计划'}</button>`}</div></div>${summary ? `<div class="cycle-totals"><span>周期视频 <strong>${summary.video} / ${summary.targetVideo}</strong></span><span>周期图文 <strong>${summary.photo} / ${summary.targetPhoto}</strong></span><span>已登记 <strong>${summary.recordedDays} / ${summary?.days ?? cycleDays(p.from,p.until)} 天</strong></span><span>周期完成率 <strong>${summary.target ? summary.pct + '%' : '—'}</strong></span></div><div class="progress"><span style="width:${summary.target ? summary.pct : 0}%"></span></div>` : ''}`;
+    $('cycle-overview').innerHTML = `<div class="section-header"><div><span class="eyebrow">周期计划</span><h2>${esc(periodTitle)} <span class="badge ${p.state === 'active' ? 'complete' : 'paused'}">${stateLabel}</span></h2><p class="muted">${p.until ? `${p.from} — ${p.until} · 共${summary?.days ?? cycleDays(p.from,p.until)}天` : p.state === 'needs-period' ? '请补充结束日期。' : p.next ? `已安排${p.next.date} — ${p.next.payload.endDate || '待设置结束日期'}` : ''}</p></div><div class="actions">${p.state === 'needs-period' ? `<button class="btn btn-primary" data-configure-cycle="${p.from}">补充计划周期</button>` : `<button class="btn" data-next-cycle="${p.state==='deleted'?'':(p.from ?? '')}">${p.until && p.state!=='deleted' ? '复制为下一周期' : '创建周期计划'}</button>`}</div></div>${summary ? `<div class="cycle-totals"><span>周期视频（已保存） <strong>${summary.video} / ${summary.targetVideo}</strong></span><span>周期图文（已保存） <strong>${summary.photo} / ${summary.targetPhoto}</strong></span><span>已登记 <strong>${summary.recordedDays} / ${summary?.days ?? cycleDays(p.from,p.until)} 天</strong></span><span>周期完成率（已保存） <strong>${summary.target ? summary.pct + '%' : '—'}</strong></span></div><div class="progress"><span style="width:${summary.target ? summary.pct : 0}%"></span></div>` : ''}`;
     const stale=date===today()&&p.state==='active'&&b.days.has(date)&&b.days.get(date).planId!==p.plan.id;
     $('day-plan-update').classList.toggle('hidden',!stale);
-    const ids=new Set(rows.map(r=>r.id)),detached=[...b.publications.values()].filter(e=>e.date===date&&!b.voids.has(e.id)&&!ids.has(e.accountId)&&effectivePublication(b,e).video+effectivePublication(b,e).photo>0);
+    const ids=new Set(rows.map(r=>r.id)),detached=[...b.publications.values()].filter(e=>e.date===date&&!b.voids.has(e.id)&&!ids.has(effectivePublication(b,e).accountId)&&effectivePublication(b,e).video+effectivePublication(b,e).photo>0);
     $('detached-note').textContent=detached.length?`${detached.length}条登记所属账号已移出当天计划，未计入下方任务完成量。可在「当天登记明细」查看或删除。`:'';
     $('detached-note').classList.toggle('hidden',!detached.length);
     const removed=p.accounts.filter(r=>b.deletedDayAccounts.has(date+'/'+r.id));
@@ -210,22 +224,24 @@ export function createApp(doc, win, loadSDK) {
     options($('owner-filter'), rows.map(r => r.owner)); options($('shop-filter'), rows.map(r => r.shop));
     const v = filtered(rows);
     $('metrics').innerHTML = [
-      [s.target ? `${s.pct}%` : '—', '完成率', s.active ? `达标 ${s.complete}/${s.active} 个账号` : '当天暂无发布任务', `<div class="progress"><span style="width:${s.target ? s.pct : 0}%"></span></div>`],
-      [`${s.video} <small>/ ${s.targetVideo}</small>`, '已发布视频', `尚缺 ${s.missingVideo} 条视频`, ''],
-      [`${s.photo} <small>/ ${s.targetPhoto}</small>`, '已发布图文', `尚缺 ${s.missingPhoto} 条图文`, ''],
+      [s.target ? `${s.pct}%` : '—', '已保存完成率', s.active ? `达标 ${s.complete}/${s.active} 个账号` : '当天暂无发布任务', `<div class="progress"><span style="width:${s.target ? s.pct : 0}%"></span></div>`],
+      [`${s.video} <small>/ ${s.targetVideo}</small>`, '已保存视频', `尚缺 ${s.missingVideo} 条视频${deltaLabel('video')}`, ''],
+      [`${s.photo} <small>/ ${s.targetPhoto}</small>`, '已保存图文', `尚缺 ${s.missingPhoto} 条图文${deltaLabel('photo')}`, ''],
       [String(s.missingVideo + s.missingPhoto), '待完成内容', `${rows.length}个账号 · 目标${s.target}条`, '']
     ].map(([value, title, sub, progress]) => `<div class="metric-card"><div class="metric-value">${value}</div><div class="metric-title">${title}</div><div class="metric-sub">${sub}</div>${progress}</div>`).join('');
     $('board-rows').innerHTML = v.map(r => {
       const c = counts(r), s = stats([r]), state = !s.active ? 'paused' : s.complete ? 'complete' : 'pending';
       const step = content => {
-        const mine = c[content], label = content === 'video' ? '视频' : '图文';
-        return `<div class="stepper"><button type="button" data-write data-step="-1" data-id="${esc(r.id)}" data-content="${content}" data-blocked="${mine < 1 || date > today()}" aria-label="${esc(r.name+' '+label+'减少1条')}">−</button><output>${c[content]}</output><button type="button" data-write data-step="1" data-id="${esc(r.id)}" data-content="${content}" data-blocked="${!selectedPerson(r).person || date > today()}" aria-label="${esc(r.name+' '+label+'增加1条')}">＋</button><span class="target">/ ${r[content]}</span></div>`;
+        const change=quickDraft?.date===date?quickDraft.changes.find(x=>x.accountId===r.id)?.[content]??0:0;
+        const mine = c[content]+(quickCurrent()?change:0), label = content === 'video' ? '视频' : '图文';
+        return `<div class="stepper"><button type="button" data-write data-step="-1" data-id="${esc(r.id)}" data-content="${content}" data-blocked="${mine < 1 || date > today()}" aria-label="${esc(r.name+' '+label+'减少1条')}">−</button><output aria-label="${esc(r.name+' '+label+(change&&quickCurrent()?'预计数量':'已保存数量'))}">${mine}</output><button type="button" data-write data-step="1" data-id="${esc(r.id)}" data-content="${content}" data-blocked="${!selectedPerson(r).person || date > today()}" aria-label="${esc(r.name+' '+label+'增加1条')}">＋</button><span class="target">/ ${r[content]}</span></div><small class="quantity-state">已保存 ${c[content]}${change?` · <strong>待保存${change>0?'＋':'−'}${Math.abs(change)}</strong>`:''}</small>`;
       };
       return `<tr><td data-label="账号 / 店铺" class="account-cell"><div class="account-name">${esc(r.name)}</div><div class="shop-name">${esc(r.shop || '未设店铺')}</div></td><td data-label="负责人">${store.mode==='feishu'?ownerControl(r,`data-blocked="${date>today()}" data-row-owner="${esc(r.id)}" aria-label="${esc(r.name)}负责人" data-write`):esc(r.owner)}</td><td data-label="产品">${esc(r.product || '待确定')}${r.note ? `<div class="row-note">${esc(r.note)}</div>` : ''}</td><td data-label="视频 / 每天目标" class="count count-cell">${step('video')}</td><td data-label="图文 / 每天目标" class="count count-cell">${step('photo')}</td><td data-label="当天状态"><span class="badge ${state}">${state === 'paused' ? '无任务' : state === 'complete' ? '已达标' : '未达标'}</span><div class="progress"><span style="width:${s.target ? s.pct : 0}%"></span></div></td><td data-label="操作" class="actions-cell"><div class="row-actions"><button class="btn btn-primary btn-sm" data-write data-publish="${esc(r.id)}" data-blocked="${date > today()}">代做</button><button class="btn btn-sm" data-entries="${esc(r.id)}">明细</button></div></td></tr>`;
     }).join('') || `<tr><td class="empty" colspan="7">${rows.length ? '没有符合筛选的账号' : p.state === 'needs-period' ? '请先补充计划的开始和结束日期。' : '当天没有任务。'}</td></tr>`;
     $('contributions').innerHTML = people(savedRows).map(p => `<div class="person-card"><strong>${esc(p.person)}</strong><span>视频 ${p.video} · 图文 ${p.photo}</span></div>`).join('') || '<p class="muted">当天还没有已保存的发布登记。</p>';
     const names = [...rows.map(r => r.owner), ...people(rows).map(p => p.person)];
     $('people-list').innerHTML = [...new Set(names)].map(p => `<option value="${esc(p)}">`).join('');
+    if(focus)[...doc.querySelectorAll('[data-step]')].find(el=>el.dataset.step===focus.step&&el.dataset.id===focus.id&&el.dataset.content===focus.content)?.focus({preventScroll:true});
   }
   function planRow(r) {
     return `<tr data-id="${esc(r.id)}" data-original-id="${esc(r.id)}">${[['name','账号名称'],['shop','店铺'],['owner','负责人'],['product','发布产品'],['video','每天视频目标'],['photo','每天图文目标']].map(([key,label]) => `<td data-label="${label}">${key==='owner'?ownerControl(r,`data-field="owner" aria-label="负责人"`):catalogKeys[key]?catalogControl(r,key,`data-field="${key}" aria-label="${label}"`):`<input data-field="${key}" value="${esc(r[key])}" type="number" min="0" max="10000" step="1" required aria-label="${label}">`}</td>`).join('')}<td data-label="操作" class="actions-cell"><button type="button" class="text-button danger" data-remove="${esc(r.id)}" data-write>删除账号</button></td></tr>`;
@@ -234,6 +250,8 @@ export function createApp(doc, win, loadSDK) {
     const b = controller.board, p = planAt(b, at), exact = b.plans.get(at) ?? (p.state === 'active' || p.state === 'needs-period' ? p.plan : null);
     $('plan-date').value = exact?.date ?? at; $('plan-end').value = exact?.payload.endDate ?? addDays($('plan-date').value, 6); $('plan-title').value = exact?.payload.title ?? '';
     const n = cycleDays($('plan-date').value, $('plan-end').value); $('plan-duration').value = [7, 14, 30].includes(n) ? String(n) : 'custom';
+    const started=!!exact&&exact.date<today();$('plan-date').disabled=started;$('plan-end').disabled=started;$('plan-duration').disabled=started;
+    $('save-plan').dataset.blocked=String(!!exact?.payload.endDate&&exact.payload.endDate<today());
     planExpected = b.planHead; planDirty = false; planLoaded = true;
     $('plan-rows').innerHTML = (exact?.payload.accounts ?? []).map(planRow).join('');
     restoreRenderedChoices($('plan-rows'));
@@ -245,6 +263,7 @@ export function createApp(doc, win, loadSDK) {
     const start = source?.payload.endDate ? addDays(source.payload.endDate, 1) : today();
     const length = source?.payload.endDate ? cycleDays(source.date, source.payload.endDate) : 7;
     $('plan-date').value = start; $('plan-end').value = addDays(start, length - 1); $('plan-title').value = ''; $('plan-duration').value = [7,14,30].includes(length) ? String(length) : 'custom';
+    for(const id of ['plan-date','plan-end','plan-duration'])$(id).disabled=false;$('save-plan').dataset.blocked='false';
     $('plan-rows').innerHTML = (source?.payload.accounts ?? []).map(planRow).join('');
     restoreRenderedChoices($('plan-rows'));
     planExpected = controller.board.planHead; planDirty = true; planLoaded = true;
@@ -257,7 +276,13 @@ export function createApp(doc, win, loadSDK) {
   function planTotal() {
     let days;
     try { days = cycleDays($('plan-date').value, $('plan-end').value); $('cycle-form-note').textContent = `共${days}天`; } catch (e) { $('cycle-form-note').textContent = e.message; }
-    try { const s = stats(readPlan().map(r => ({ ...r, executions: [] }))); $('plan-total').textContent = `${$('plan-rows').children.length}个账号 · 每天视频${s.targetVideo} / 图文${s.targetPhoto}${days ? ' · 周期视频目标' + days * s.targetVideo + ' / 图文目标' + days * s.targetPhoto : ''}`; } catch { $('plan-total').textContent = '请补全账号名称、负责人和每天目标'; }
+    try {
+      const cfg=readPlan(),s=stats(cfg.map(r=>({...r,executions:[]}))),start=$('plan-date').value,end=$('plan-end').value,existing=controller.board.plans.get(start),effectiveDate=existing&&start<today()?today():start;
+      let total=days?{targetVideo:days*s.targetVideo,targetPhoto:days*s.targetPhoto}:null;
+      if(existing&&days&&effectiveDate<=end){const a=makeAction(controller.board,'plan',start,{accounts:cfg,expected:planExpected,endDate:end,title:$('plan-title').value,effectiveDate},store.actor,'preview-plan');const preview=project([...controller.board.actions,a]);if(preview.accepted.has(a.id))total=cycleSummary(preview,preview.plans.get(start));else throw Error(preview.conflicts.find(c=>c.id===a.id)?.reason);}
+      $('plan-total').textContent=`${cfg.length}个账号 · 每天视频${s.targetVideo} / 图文${s.targetPhoto}${total?` · 周期累计目标：视频${total.targetVideo} / 图文${total.targetPhoto}`:''}`;
+      if(days)$('cycle-form-note').textContent=`共${days}天${existing&&start<=today()?` · 调整从${today()}生效，过去日期保留`:''}`;
+    } catch(e) { $('plan-total').textContent=e.message||'请补全账号名称、负责人和每天目标'; }
     $('plan-note').textContent = planDirty ? '有未保存的计划修改' : ''; $('plan-note').classList.toggle('hidden', !planDirty);
     $('delete-plan').classList.toggle('hidden',!controller.board.plans.has($('plan-date').value));
   }
@@ -273,11 +298,11 @@ export function createApp(doc, win, loadSDK) {
   function renderEntries() {
     const b = controller.board, r = dayAt(b, date).find(r => r.id === entriesAccount);
     $('entries-title').textContent = `${date} · ${r?.name??'当天登记明细'}`;
-    const entries = [...b.publications.values()].filter(e => e.date === date && (!entriesAccount||e.accountId===entriesAccount) && !b.deletedEntries.has(e.id)).reverse();
+    const entries = [...b.publications.values()].filter(e => e.date === date && (!entriesAccount||effectivePublication(b,e).accountId===entriesAccount) && !b.deletedEntries.has(e.id)).reverse();
     $('entries').innerHTML = entries.map(e => {
       const voided = b.voids.has(e.id), why = b.actions.filter(a => a.kind === 'void' && a.payload.target === e.id && b.accepted.has(a.id)).map(a => a.payload.reason).join('；');
       const current = effectivePublication(b, e), reduced = b.reductions.get(e.id);
-      return `<div class="entry ${voided ? 'voided' : ''}"><div><p><strong>${esc(e.account?.name??r?.name??'账号')}</strong> · ${delegatedPublication(current)?'代做登记':'本人登记'} · 视频${voided ? 0 : current.video} · 图文${voided ? 0 : current.photo}${e.imported ? ' · 历史导入' : ''}</p><p class="muted">${esc(current.note)}</p>${reduced ? `<p class="muted">快捷减1更正：视频${reduced.video}、图文${reduced.photo}</p>` : ''}${b.edits.has(e.id)?'<p class="muted">已修改登记</p>':''}<p class="muted">${new Date(e.at).toLocaleString('zh-CN')}${voided ? ' · 已撤销：' + esc(why) : ''}</p></div><div class="row-actions">${!voided?`<button class="btn btn-sm" data-write data-edit-entry="${esc(e.id)}">修改登记</button>`:''}<button class="btn btn-sm danger" data-write data-delete-entry="${esc(e.id)}">删除记录</button></div></div>`;
+      return `<div class="entry ${voided ? 'voided' : ''}"><div><p><strong>${esc(current.account?.name??current.accountId)}</strong> · ${delegatedPublication(current)?'代做登记':'本人登记'} · 视频${voided ? 0 : current.video} · 图文${voided ? 0 : current.photo}${e.imported ? ' · 历史导入' : ''}</p><p class="muted">登记时安排：${current.account?esc((current.account.shop||'未记录店铺')+' · '+(current.account.product||'未记录计划产品')+' · 负责人 '+current.account.owner):'历史字段缺失，未回填当前计划'}<br>完成人：${esc(current.person)}</p><p class="muted">${esc(current.note)}</p>${reduced ? `<p class="muted">数量更正：视频${reduced.video}、图文${reduced.photo}</p>` : ''}${b.edits.has(e.id)?'<p class="muted">已修改登记</p>':''}<p class="muted">${new Date(e.at).toLocaleString('zh-CN')}${voided ? ' · 已撤销：' + esc(why) : ''}</p></div><div class="row-actions">${!voided?`<button class="btn btn-sm" data-write data-edit-entry="${esc(e.id)}">修改登记</button>`:''}<button class="btn btn-sm danger" data-write data-delete-entry="${esc(e.id)}">删除记录</button></div></div>`;
     }).join('') || '<p class="muted">还没有发布登记。</p>';
   }
   function render() {
@@ -303,6 +328,7 @@ export function createApp(doc, win, loadSDK) {
     if(askQuick(()=>openPublish(id)))return;
     writable(); if (date > today()) throw Error('未来日期尚未开始，请到当天再登记'); const r = row(id);
     editing = { id, date, snapshot: snapshot(), head:r.head }; $('publish-form').reset(); registrationDirty=false;
+    $('entry-arrangement').classList.add('hidden');$('correct-arrangement').checked=false;$('entry-details').querySelectorAll('input,select').forEach(input=>input.disabled=true);
     $('publish-title').textContent = `登记代做 · ${date} · ${r.name}`;
     $('publish-person-control').innerHTML=ownerControl({owner:'',ownerId:''},'name="person" aria-label="代做人"').replaceAll('选择负责人','选择代做人');
     $('publish-person-row').hidden=false;$('publish-person-label').textContent='代做人';$('publish-submit').textContent='保存代做登记';show($('publish-dialog'));
@@ -311,17 +337,27 @@ export function createApp(doc, win, loadSDK) {
     if(askQuick(()=>openEntryEdit(id)))return;
     writable();const entry=controller.board.publications.get(id);
     if(!entry||controller.board.voids.has(id)||controller.board.deletedEntries.has(id))throw Error('记录已被删除或撤销，请重新打开明细');
-    const current=publicationState(controller.board,entry);editing={target:id,date:entry.date,expected:current,delegate:delegatedPublication(effectivePublication(controller.board,entry))};registrationDirty=false;
+    const current=publicationState(controller.board,entry),effective=effectivePublication(controller.board,entry);editing={target:id,date:entry.date,expected:current,expectedAccount:clone(effective.account),delegate:delegatedPublication(effective)};registrationDirty=false;
     $('publish-form').reset();$('publish-title').textContent=`修改登记 · ${entry.date} · ${entry.account?.name??'账号'}`;
     $('publish-person-row').hidden=!editing.delegate;$('publish-person-label').textContent='代做人';$('publish-person-control').innerHTML=editing.delegate?ownerControl({owner:current.person,ownerId:current.personId},'name="person" aria-label="代做人"').replaceAll('选择负责人','选择代做人'):'';
     for(const key of ['video','photo','note'])$('publish-form').elements.namedItem(key).value=current[key];
+    $('entry-arrangement').classList.remove('hidden');$('correct-arrangement').checked=false;$('entry-arrangement-fields').hidden=true;
+    const choices=new Map(dayAt(controller.board,entry.date).map(r=>[r.id,config([r])[0]]));if(effective.account)choices.set(effective.accountId,effective.account);
+    editing.accounts=[...choices.values()];$('entry-account').innerHTML=editing.accounts.map(r=>`<option value="${esc(r.id)}" ${r.id===effective.accountId?'selected':''}>${esc(r.name)}</option>`).join('');$('entry-account').value=effective.accountId;
+    renderEntryArrangement(effective.account);
     $('publish-submit').textContent='保存修改';show($('publish-dialog'));
+  }
+  function renderEntryArrangement(account){
+    if(!account){$('entry-details').textContent='历史安排缺失，请保留原归属，先核对来源';return;}
+    $('entry-details').innerHTML=['shop','product'].map(key=>`<label>${key==='shop'?'店铺':'登记时计划产品'}${catalogControl(account,key,`data-entry-field="${key}" aria-label="纠错${key==='shop'?'店铺':'计划产品'}"`)}</label>`).join('')+`<label>登记时负责人${ownerControl(account,'data-entry-field="owner" aria-label="纠错负责人"')}</label>`;
+    restoreRenderedChoices($('entry-details'));
+    $('entry-details').querySelectorAll('input,select').forEach(input=>input.disabled=!$('correct-arrangement').checked);
   }
   async function save(kind, at, payload, key) {
     const action = makeAction(controller.board, kind, at, payload, store.actor, key);
     return controller.send(action);
   }
-  function planPayload(accounts,source) {const at=today();return {accounts,expected:controller.board.planHead,endDate:source.payload.endDate,title:source.payload.title??'',cleanupRemoved:true,...(source.date<=at&&at<=source.payload.endDate?{applyDate:at,applyHeads:dayHeads(controller.board,at)}:{})};}
+  function planPayload(accounts,source) {const at=today();return {accounts,expected:controller.board.planHead,endDate:source.payload.endDate,title:source.payload.title??'',effectiveDate:source.date>at?source.date:at,...(source.date<=at&&at<=source.payload.endDate?{applyDate:at,applyHeads:dayHeads(controller.board,at)}:{})};}
   function confirmDelete(target,title,detail) {writable();deleteTarget=target;$('delete-title').textContent=title;$('delete-detail').textContent=detail;show($('delete-dialog'));renderStatus();}
   async function finishBusiness(){await syncBusiness(true);if(store.mode==='feishu'&&!businessMessage.includes('已更新'))message('看板已保存，'+businessMessage);}
   async function connect() {
@@ -355,8 +391,8 @@ export function createApp(doc, win, loadSDK) {
     await fresh.refresh(); // Keep the previous mode intact if connecting or reading fails.
     offStore?.(); win.clearInterval(pollTimer); win.clearTimeout(refreshTimer);
     controller = fresh; store = next; planLoaded = false; planDirty = false; businessMessage = ''; lastBusinessRevision = ''; deleteTarget=null; members = []; memberRows=[];membersError = '';catalog={accounts:[],shops:[],products:[]};catalogError='';quickDraft=null;
-    const cachedQuick=win.localStorage.getItem(quickKey());
-    if(cachedQuick){const cached=JSON.parse(cachedQuick);if(!validDate(cached.date))throw Error('暂存登记日期无效，请核对本地草稿');makeAction(controller.board,'batch',cached.date,cached,store.actor);quickDraft=cached;date=cached.date;followToday=date===today();}
+    const cachedQuick=win.sessionStorage.getItem(quickKey())??(!win.sessionStorage.getItem(quickKey()+':legacy-seen')?win.localStorage.getItem(quickKey()):null);
+    if(cachedQuick){const cached=JSON.parse(cachedQuick);if(!validDate(cached.date)||!Array.isArray(cached.changes)||!Array.isArray(cached.snapshot))throw Error('暂存登记格式无效，请核对本地草稿');quickDraft={...cached,...(cached.v!==7?{requiresReview:true}:{})};persistQuick();win.sessionStorage.setItem(quickKey()+':legacy-seen','true');date=cached.date;followToday=date===today();}
     offStore = store.subscribe(() => {
       win.clearTimeout(refreshTimer);
       refreshTimer = win.setTimeout(() => { if (!controller.busy && !importing) controller.refresh().catch(() => {}); }, 350);
@@ -467,7 +503,7 @@ export function createApp(doc, win, loadSDK) {
     const p = controller.pending; if (!p) return;
     const result = p.kind === 'stop' ? await controller.stopPending() : await controller.send(p);
     if(quickDraft?.actionId===(p.kind==='stop'?p.payload.target:p.id)){
-      if(result==='stopped'){delete quickDraft.actionId;win.localStorage.setItem(quickKey(),JSON.stringify(quickDraft));}
+      if(result==='stopped'){delete quickDraft.actionId;persistQuick();}
       else{discardQuick();await finishBusiness();}
     }
     registrationDirty=false;editing=null;close($('publish-dialog'));
@@ -477,7 +513,7 @@ export function createApp(doc, win, loadSDK) {
     if (!controller?.pending) return;
     const original=controller.pending.kind==='stop'?controller.pending.payload.target:controller.pending.id;
     const result = await controller.stopPending();
-    if(quickDraft?.actionId===original){if(result==='stopped'){delete quickDraft.actionId;win.localStorage.setItem(quickKey(),JSON.stringify(quickDraft));}else{discardQuick();await finishBusiness();}}
+    if(quickDraft?.actionId===original){if(result==='stopped'){delete quickDraft.actionId;persistQuick();}else{discardQuick();await finishBusiness();}}
     registrationDirty=false;editing=null;close($('publish-dialog'));
     message(result === 'restored' ? '原操作已随备份恢复，恢复后的数量保留；旧请求迟到不会重复登记，请核对明细。' : result === 'saved' ? '原请求已在停止前生效，记录和数量保留；请核对明细。如需更正，请另行调整或撤销。' : '停止请求已确认：原请求未生效，今后迟到也不会生效。可以重新登记。');
   });
@@ -496,7 +532,7 @@ export function createApp(doc, win, loadSDK) {
     if (b.dataset.editEntry) openEntryEdit(b.dataset.editEntry);
     if (b.dataset.business) { if (!store?.openBusiness) return; await store.openBusiness(b.dataset.business); close($('business-dialog')); }
     if (b.dataset.entries) { entriesAccount = b.dataset.entries; renderEntries(); show($('entries-dialog')); renderStatus(); }
-    if(b.dataset.deleteEntry){const entry=controller.board.publications.get(b.dataset.deleteEntry);if(!entry)throw Error('记录已变化，请刷新');confirmDelete({type:'publication',entry,expected:publicationState(controller.board,entry)},'删除这条登记？',`${entry.date} · ${entry.account?.name??'账号'} · 视频${effectivePublication(controller.board,entry).video} / 图文${effectivePublication(controller.board,entry).photo}。确认后从完成数量中扣除，并删除飞书发布明细中的对应行。操作审计保留，不参与统计。`);}
+    if(b.dataset.deleteEntry){const entry=controller.board.publications.get(b.dataset.deleteEntry);if(!entry)throw Error('记录已变化，请刷新');confirmDelete({type:'publication',entry,expected:publicationState(controller.board,entry),expectedAccount:clone(effectivePublication(controller.board,entry).account)},'删除这条登记？',`${entry.date} · ${effectivePublication(controller.board,entry).account?.name??'账号'} · 视频${effectivePublication(controller.board,entry).video} / 图文${effectivePublication(controller.board,entry).photo}。确认后从完成数量中扣除，并删除飞书发布明细中的对应行。操作审计保留，不参与统计。`);}
     if(b.dataset.deletePlan){const p=controller.board.plans.get(b.dataset.deletePlan);if(!p)throw Error('计划已变化');const entries=[...controller.board.publications.values()].filter(e=>e.date>=p.date&&e.date<=(p.payload.endDate??p.date)&&!controller.board.deletedEntries.has(e.id)).map(e=>e.id);confirmDelete({type:'plan',plan:p,expected:controller.board.planHead,heads:dayHeads(controller.board,today()),entries},'删除这个周期及其登记？',`${p.payload.title||'周期计划'} · ${p.date}至${p.payload.endDate??'未设结束日期'} · ${p.payload.accounts.length}个账号、${entries.length}条登记。确认后删除本周期的计划、周期进度、每日进度和发布明细；不影响其他周期。`);}
     if(b.dataset.restoreDay){await save('delete',date,{type:'restore-day-account',target:b.dataset.restoreDay,expectedHeads:dayHeads(controller.board,date)});render();await finishBusiness();message('当天任务已恢复，已删除的错误登记不会恢复，请重新登记实际数量');}
     if (b.dataset.remove) { writable(); b.closest('tr').remove(); planDirty = true; planTotal(); message('账号已从草稿移除；点击保存发布计划后同步飞书。已有发布登记保留。'); }
@@ -517,6 +553,16 @@ export function createApp(doc, win, loadSDK) {
   $('date').onchange = () => { const next=$('date').value;if (validDate(next)) {const change=()=>{date=next;followToday=date===today();render();};if(askQuick(change))$('date').value=date;else change();} };
   $('today').onclick = () => { const change=()=>{followToday=true;date=today();render();};if(!askQuick(change))change(); };
   $('quick-save').onclick=run(saveQuick);
+  $('quick-review').onclick=run(reviewQuick);
+  $('quick-review-form').onsubmit=run(async e=>{
+    e.preventDefault();writable();if(!quickReview||!quickDraft)throw Error('请重新核对暂存');
+    const changes=[...$('quick-review-rows').children].map(el=>{const id=el.dataset.account,r=quickReview.snapshot.find(r=>r.id===id),values=Object.fromEntries([...el.querySelectorAll('[data-delta]')].map(input=>[input.dataset.delta,Number(input.value)]));return {accountId:id,person:r?.owner??'已移出',...(r?.ownerId?{personId:r.ownerId}:{}),...values};}).filter(c=>c.video||c.photo);
+    await controller.refresh();
+    const payload=batchPayload(controller.board,quickReview.date,changes,quickReview),issues=batchConflicts(controller.board,quickReview.date,payload);
+    if(issues.length)throw Error(issues.join('；')+'。尚未替换原输入，请重新核对');
+    if(changes.length){quickDraft={v:7,...quickReview,changes};persistQuick();}else discardQuick();
+    quickReview=null;close($('quick-review-dialog'));render();message('核对后的变化已暂存，点击保存登记后生效');
+  });
   $('quick-discard').onclick=()=>{if(win.confirm('放弃本次未保存的＋／−修改？飞书中的已保存登记保留。'))discardQuick();};
   $('quick-stay').onclick=()=>{leaveQuick=null;close($('quick-leave-dialog'));};
   $('quick-leave-discard').onclick=()=>{const next=leaveQuick;leaveQuick=null;discardQuick();close($('quick-leave-dialog'));next?.();};
@@ -548,19 +594,25 @@ export function createApp(doc, win, loadSDK) {
   $('plan-end').onchange = () => { $('plan-duration').value = 'custom'; planDirty = true; planTotal(); };
   $('add-account').onclick = run(() => { writable(); if ($('plan-rows').children.length >= 100) throw Error('最多100个账号'); const fragment=doc.createElement('tbody');fragment.innerHTML=planRow({ id: crypto.randomUUID(), name: '', shop: '', owner: '', product: '', video: 0, photo: 0 });$('plan-rows').append(fragment.firstElementChild); planDirty = true; planTotal(); $('plan-rows').lastElementChild.querySelector('[data-field="name"]').focus(); });
   $('plan-reset').onclick = () => { if (!planDirty || win.confirm('放弃尚未保存的计划修改，重新读取共享计划？')) loadPlan($('plan-date').value); };
-  $('plan-form').onsubmit = run(async e => { e.preventDefault(); writable(); const cfg = readPlan(), at = $('plan-date').value, endDate = $('plan-end').value; cycleDays(at, endDate); if (!cfg.length&&!controller.board.plans.has(at)) throw Error('请至少添加一个账号，再保存周期计划'); const current=today(),payload={accounts:cfg,expected:planExpected,endDate,title:$('plan-title').value,cleanupRemoved:true,...(at<=current&&(current<=endDate||controller.board.plans.get(at)?.id===planAt(controller.board,current).plan?.id)?{applyDate:current,applyHeads:dayHeads(controller.board,current),...(endDate<current?{applyAccounts:[]}:{} )}:{})};await save('plan', at, payload);planDirty = false; loadPlan(at);date=at<=current&&current<=endDate?current:at;followToday=date===current;switchTab('board');await finishBusiness(); message(`计划已保存，${date===current?'今天任务已更新':'已打开计划开始日期'}；已有发布登记保留`); });
+  $('plan-form').onsubmit = run(async e => { e.preventDefault(); writable(); const cfg = readPlan(), at = $('plan-date').value, endDate = $('plan-end').value; cycleDays(at, endDate); const current=today(),existing=controller.board.plans.get(at);if(!existing&&at<current)throw Error('新周期从今天或未来日期开始，不补造过去安排');if(endDate<current)throw Error('该周期已结束，请建立新周期');if(!cfg.length&&!existing)throw Error('请至少添加一个账号，再保存周期计划');const payload={accounts:cfg,expected:planExpected,endDate,title:$('plan-title').value,effectiveDate:existing&&at<current?current:at,...(at<=current&&current<=endDate?{applyDate:current,applyHeads:dayHeads(controller.board,current)}:{})};await save('plan', at, payload);planDirty = false; loadPlan(at);date=at<=current&&current<=endDate?current:at;followToday=date===current;switchTab('board');await finishBusiness(); message(`计划已保存，${date===current?'从今天生效，过去安排保留':'已打开计划开始日期'}；已有发布登记保留`); });
   $('publish-form').addEventListener('input',()=>{registrationDirty=true;});
+  $('correct-arrangement').onchange=()=>{$('entry-arrangement-fields').hidden=!$('correct-arrangement').checked;$('entry-details').querySelectorAll('input,select').forEach(input=>input.disabled=!$('correct-arrangement').checked);registrationDirty=true;};
+  $('entry-account').onchange=()=>{renderEntryArrangement(editing?.accounts.find(r=>r.id===$('entry-account').value));registrationDirty=true;};
   $('publish-dialog').addEventListener('cancel',e=>{e.preventDefault();cancelRegistration();});
   $('publish-form').onsubmit = run(async e => {
     e.preventDefault(); writable(); const data=Object.fromEntries(new win.FormData($('publish-form')));
     if (!editing) throw Error('请重新打开登记');
     const person=editing.target&&!editing.delegate?{person:editing.expected.person,...(editing.expected.personId?{personId:editing.expected.personId}:{})}:publicationPerson(data.person),values={...person,video:Number(data.video),photo:Number(data.photo),note:data.note};
     await controller.refresh();
-    if(editing.target)await save('edit',editing.date,{target:editing.target,expected:editing.expected,...values});
+    if(editing.target){
+      let account;
+      if($('correct-arrangement').checked){account=clone(editing.accounts.find(r=>r.id===$('entry-account').value));if(!account)throw Error('请选择该日期的真实账号');for(const input of $('entry-details').querySelectorAll('[data-entry-field]'))Object.assign(account,input.dataset.entryField==='owner'?readOwner(input):readCatalog(input,input.dataset.entryField));account=config([account])[0];}
+      await save('edit',editing.date,{target:editing.target,expected:editing.expected,expectedAccount:editing.expectedAccount,...(account?{account}:{}),...values});
+    }
     else {
       if(editing.date>today())throw Error('未来日期尚未开始');
       const current=dayAt(controller.board,editing.date).find(r=>r.id===editing.id);
-      if(!current||current.head!==editing.head)throw Error('计划已变化，请关闭后重新打开代做登记');
+      if(!current||taskIdentity(current)!==taskIdentity(editing.snapshot.find(r=>r.id===editing.id)))throw Error('该账号安排已变化，代做输入保留，请核对安排后再登记');
       await save('publish',editing.date,{snapshot:editing.snapshot,accountId:editing.id,...values});
     }
     const updated=!!editing.target;registrationDirty=false;editing=null;close($('publish-dialog'));render();await finishBusiness();
@@ -569,7 +621,7 @@ export function createApp(doc, win, loadSDK) {
   $('delete-plan').onclick=()=>{const button=doc.createElement('button');button.dataset.deletePlan=$('plan-date').value;doc.body.append(button);button.click();button.remove();};
   $('delete-confirm').onclick=run(async()=>{
     writable();const target=deleteTarget;if(!target)return;
-    if(target.type==='publication')await save('delete',target.entry.date,{type:'publication',target:target.entry.id,expected:target.expected,reason:'用户确认删除错误登记'});
+    if(target.type==='publication')await save('delete',target.entry.date,{type:'publication',target:target.entry.id,expected:target.expected,expectedAccount:target.expectedAccount,reason:'用户确认删除错误登记'});
     else if(target.type==='plan')await save('delete',target.plan.date,{type:'plan',target:target.plan.id,expected:target.expected,applyDate:today(),applyHeads:target.heads,cascade:true,entries:target.entries});
     else{const payload=planPayload(config(target.plan.payload.accounts.filter(r=>r.id!==target.accountId)),target.plan);payload.expected=target.expected;payload.applyHeads=target.heads;await save('plan',target.plan.date,payload);}
     close($('delete-dialog'));deleteTarget=null;if(target.type!=='publication'){planLoaded=false;planDirty=false;}render();await finishBusiness();message(store.mode==='feishu'?`已删除并停止计数；${businessMessage}`:'已删除，错误登记不再计入');
