@@ -237,6 +237,11 @@ export function cycleAccounts(board,plan) {
   if(plan.v<7)return clone(plan.payload.accounts);
   const byId=new Map();
   for(let d=plan.date;d<=plan.payload.endDate;d=addDays(d,1))for(const r of scheduledPlan(board,plan,d)?.payload.accounts??[])byId.set(r.id,clone(r));
+  // A same-day replacement can leave a valid saved contribution on a retired account.
+  // Keep that quantity visible without letting it fulfill the replacement account's target.
+  for(const entry of board.publications.values())if(entry.date>=plan.date&&entry.date<=plan.payload.endDate&&!board.voids.has(entry.id)&&!board.deletedEntries.has(entry.id)){
+    const c=effectivePublication(board,entry);if(c.account&&!byId.has(c.accountId))byId.set(c.accountId,clone(c.account));
+  }
   return [...byId.values()];
 }
 // Receipt numbers are read from the host's read-only AutoNumber field, never from action JSON.
