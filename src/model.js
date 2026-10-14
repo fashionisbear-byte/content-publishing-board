@@ -76,6 +76,9 @@ export function cycleProductRows(board,plan,accountId){
   return [...rows.values()].map(r=>({...r,dates:[...r.dates.values()].sort((a,b)=>a.date.localeCompare(b.date))}));
 }
 export function originalCycleProduct(board,plan,accountId){return productFromAccount((board.planVersions.get(plan.date)??[plan]).flatMap(p=>p.payload.accounts).find(r=>r.id===accountId));}
+export function productDistributionText(board,date,accountId){
+  return productRows(board,date,accountId).map(p=>({...p,...counts(p)})).filter(p=>p.video||p.photo).map(p=>(p.productRef?(p.product||'未记录名称'):p.product?'归属未确定（'+p.product+'）':'归属未确定')+' 视频'+p.video+' / 图文'+p.photo).join('；');
+}
 export const personKey = e => e.personId ? 'member:' + e.personId : 'name:' + e.person;
 export function validateAction(raw) {
   if (!raw || ![1, 2, 3, 4, 5, 6, 7, 8].includes(raw.v) || !['products', 'protocol', 'plan', 'publish', 'batch', 'day', 'void', 'seed', 'reduce', 'stop', 'delete', 'edit'].includes(raw.kind)) throw Error('共享记录格式或版本无效，请刷新到新版看板');
@@ -578,7 +581,7 @@ export function report(board, date, rows = dayAt(board, date)) {
   const s = stats(rows);
   return `${date} 内容发布日报\n视频 ${s.video}/${s.targetVideo}，图文 ${s.photo}/${s.targetPhoto}\n达标 ${s.complete}/${s.active} 个账号，缺视频 ${s.missingVideo}、缺图文 ${s.missingPhoto}\n\n` + rows.map(r => {
     const c = counts(r);
-    return `${r.name}（${r.owner}）｜${r.product || '待确定'}\n视频 ${c.video}/${r.video}，图文 ${c.photo}/${r.photo}` + (r.note ? `｜${r.note}` : '');
+    return `${r.name}（${r.owner}）｜周期计划产品：${r.product || '待确定'}\n视频 ${c.video}/${r.video}，图文 ${c.photo}/${r.photo}\n已保存产品分布：${productDistributionText(board,date,r.id)||'尚无有效发布'}` + (r.note ? `｜${r.note}` : '');
   }).join('\n') + '\n\n实际贡献\n' + people(rows).map(p => `${p.person}：视频 ${p.video}，图文 ${p.photo}，协助 ${p.support}`).join('\n');
 }
 // Migration is additive: existing days and existing plans are never replaced.

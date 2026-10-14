@@ -1,4 +1,4 @@
-import { FORMAT, productSnapshot, productFromAccount, productKey, publicationProduct, productRows, dayProducts, cycleProductRows, originalCycleProduct, cycleAccounts, accountCycleSummary, clone, today, config, validDate, addDays, cycleDays, cycleSummary, executionDates, hasRegistration, dayHeads, dayEntries, cycleIdentity, taskIdentity, batchBasis, batchPayload, batchConflicts, makeAction, project, planAt, dayAt, counts, stats, people, effectivePublication, publicationState, delegatedPublication, csvCell, report, migration, importPreview, makeRestoreAction } from './model.js';
+import { FORMAT, productDistributionText, productSnapshot, productFromAccount, productKey, publicationProduct, productRows, dayProducts, cycleProductRows, originalCycleProduct, cycleAccounts, accountCycleSummary, clone, today, config, validDate, addDays, cycleDays, cycleSummary, executionDates, hasRegistration, dayHeads, dayEntries, cycleIdentity, taskIdentity, batchBasis, batchPayload, batchConflicts, makeAction, project, planAt, dayAt, counts, stats, people, effectivePublication, publicationState, delegatedPublication, csvCell, report, migration, importPreview, makeRestoreAction } from './model.js';
 import { Controller, TABLE_NAME, createFeishuStore, createDemoStore } from './storage.js';
 import { boardRevision } from './business.js';
 
@@ -699,9 +699,9 @@ export function createApp(doc, win, loadSDK) {
   });
   $('csv').onclick = run(() => {
     if (!controller?.ready) throw Error('请先完整加载数据');
-    const table = [['日期', '周期开始', '周期结束', '周期名称', '登记情况', '账号', '店铺', '账号负责人', '产品', '每天视频目标', '每天图文目标', '视频完成', '图文完成', '视频缺口', '图文缺口', '实际完成人及贡献', '备注']];
+    const table = [['日期', '周期开始', '周期结束', '周期名称', '登记情况', '账号', '店铺', '账号负责人', '周期计划产品', '当天安排产品', '已保存产品分布', '每天视频目标', '每天图文目标', '视频完成', '图文完成', '视频缺口', '图文缺口', '实际完成人及贡献', '备注']];
     for (const d of executionDates(controller.board)) if (d >= $('history-from').value && d <= $('history-to').value) for (const r of dayAt(controller.board, d)) {
-      const c = counts(r), p = planAt(controller.board, d); table.push([d, p.from, p.until, p.title, hasRegistration(controller.board,d) ? '已登记' : '未登记', r.name, r.shop, r.owner, r.product, r.video, r.photo, c.video, c.photo, Math.max(0, r.video - c.video), Math.max(0, r.photo - c.photo), people([r]).map(p => `${p.person} 视频${p.video} 图文${p.photo}`).join('；'), r.note]);
+      const c = counts(r), p = planAt(controller.board, d); table.push([d, p.from, p.until, p.title, hasRegistration(controller.board,d) ? '已登记' : '未登记', r.name, r.shop, r.owner, r.product, dayProducts(controller.board,d,r.id).map(p=>p.product||'归属未确定').join('、')||'暂无安排', productDistributionText(controller.board,d,r.id), r.video, r.photo, c.video, c.photo, Math.max(0, r.video - c.video), Math.max(0, r.photo - c.photo), people([r]).map(p => `${p.person} 视频${p.video} 图文${p.photo}`).join('；'), r.note]);
     }
     download('\uFEFF' + table.map(r => r.map(csvCell).join(',')).join('\r\n'), `执行记录-${$('history-from').value}-${$('history-to').value}.csv`, 'text/csv;charset=utf-8');
   });
