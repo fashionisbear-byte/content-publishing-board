@@ -18,3 +18,8 @@
 .quick-save-bar{position:sticky;top:0;z-index:3;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px;margin:12px 0;background:#edf8f3;border:1px solid #b9dfcf;border-radius:8px}.quick-save-bar>div{flex:1;min-width:160px}.quick-save-bar strong{color:var(--primary)}#removed-day .btn{margin:5px 8px 0 0}#quick-leave-dialog .dialog-actions{flex-wrap:wrap}@media(max-width:520px){.quick-save-bar>div{flex-basis:100%}.quick-save-bar .btn{flex:1}}
 
 .quantity-state{display:block;margin-top:5px;color:#53635e;font-size:12px;white-space:normal}.quantity-state strong{color:#986000}.review-row{padding:12px 0;border-bottom:1px solid #dce5e1}.review-row p{overflow-wrap:anywhere}.quick-save-bar{flex-wrap:wrap}.quick-save-bar>div{flex:1 1 200px}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #00805a;outline-offset:3px}#entry-arrangement{margin-top:12px}#entry-arrangement input[type=checkbox]{width:auto}#entry-arrangement-fields label{margin:10px 0}.row-actions [data-publish]{background:transparent;color:#53635e;border-color:#cfdad4}
+
+.distribution-account{padding:12px 0;border-bottom:1px solid var(--border,#dce2e9)}
+.distribution-account details{padding:10px 0}.distribution-account summary{cursor:pointer;line-height:1.7;overflow-wrap:anywhere}.distribution-account details .btn{margin:8px 8px 0 0}
+#products-list{margin-top:16px}#products-dialog select{min-width:0;max-width:100%}.product-continuation{background:#f8fafc}.account-cell small{display:block;margin-top:6px;line-height:1.6}.board-table td strong{overflow-wrap:anywhere}
+@media(max-width:700px){.product-continuation{border-top:1px dashed #dce2e9}#products-dialog .actions{flex-wrap:wrap}#products-dialog select{width:100%}}

@@ -1,4 +1,4 @@
-import { FORMAT, clone, today, config, validDate, addDays, cycleDays, cycleSummary, executionDates, hasRegistration, dayHeads, dayEntries, cycleIdentity, taskIdentity, batchBasis, batchPayload, batchConflicts, makeAction, project, planAt, dayAt, counts, stats, people, effectivePublication, publicationState, delegatedPublication, csvCell, report, migration, importPreview, makeRestoreAction } from './model.js';
+import { FORMAT, productSnapshot, productFromAccount, productKey, publicationProduct, productRows, dayProducts, cycleProductRows, originalCycleProduct, cycleAccounts, accountCycleSummary, clone, today, config, validDate, addDays, cycleDays, cycleSummary, executionDates, hasRegistration, dayHeads, dayEntries, cycleIdentity, taskIdentity, batchBasis, batchPayload, batchConflicts, makeAction, project, planAt, dayAt, counts, stats, people, effectivePublication, publicationState, delegatedPublication, csvCell, report, migration, importPreview, makeRestoreAction } from './model.js';
 import { Controller, TABLE_NAME, createFeishuStore, createDemoStore } from './storage.js';
 import { boardRevision } from './business.js';
 
@@ -8,6 +8,7 @@ export function createApp(doc, win, loadSDK) {
   let controller = null, store = null, tab = 'board', date = today(), followToday = true, planDirty = false, planExpected = null, planLoaded = false;
   let editing = null, entriesAccount = null, incoming = null, toastTimer, pollTimer, offStore, refreshTimer, connecting = false, importing = false, connectionEpoch = 0;
   let registrationDirty = false;
+  let entriesProduct=null, productEditing=null, productsDirty=false;
   let deleteTarget = null;
   let quickDraft = null, leaveQuick = null, quickReview = null;
   const quickKey=()=> 'tiktok-board-quick-draft:'+store.scope;
@@ -16,15 +17,17 @@ export function createApp(doc, win, loadSDK) {
   function persistQuick(){win.sessionStorage.setItem(quickKey(),JSON.stringify(quickDraft));}
   function discardQuick(){win.sessionStorage.removeItem(quickKey());quickDraft=null;render();}
   function askQuick(next){if(!quickDraft)return false;leaveQuick=next;show($('quick-leave-dialog'));return true;}
-  function stageQuantity(id,content,delta){
+  function stageQuantity(id,content,delta,key){
     writable();if(date>today())throw Error('未来日期仅查看');
     if(!quickCurrent())throw Error(quickIssues().join('；')+'。原输入保留，请点「核对暂存」');
     if(quickDraft&&quickDraft.date!==date)throw Error('请先保存另一日期的暂存登记');
     const r=row(id),selected=selectedPerson(r),member=selected.person?selected:{person:r.owner,...(r.ownerId?{personId:r.ownerId}:{})};if(delta>0&&!selected.person)throw Error('请先选择账号负责人');
-    const draft=clone(quickDraft??{v:7,date,snapshot:snapshot(),expectedHeads:dayHeads(controller.board,date),expectedEntries:dayEntries(controller.board,date),cycleId:cycleIdentity(controller.board,date),basis:batchBasis(controller.board,date),changes:[]});
-    let change=draft.changes.find(c=>c.accountId===id);
-    if(!change){change={accountId:id,...member,video:0,photo:0};draft.changes.push(change);}
-    if(counts(r)[content]+change[content]+delta<0)throw Error('不能减少到0以下');
+    const product=productRows(controller.board,date,id).find(p=>p.key===key)??productRows(controller.board,date,id)[0];if(!product)throw Error('请先添加当天产品');
+    if(delta>0&&!product.arranged)throw Error('该产品已移出当天安排，请先加回');
+    const draft=clone(quickDraft??{v:8,date,snapshot:snapshot(),expectedHeads:dayHeads(controller.board,date),expectedEntries:dayEntries(controller.board,date),cycleId:cycleIdentity(controller.board,date),basis:batchBasis(controller.board,date),changes:[]});
+    let change=draft.changes.find(c=>c.accountId===id&&productKey(c.product)===product.key);
+    if(!change){change={accountId:id,product:productSnapshot(product),...member,video:0,photo:0};draft.changes.push(change);}
+    if(counts(product)[content]+change[content]+delta<0)throw Error('不能减少到0以下');
     change[content]+=delta;draft.changes=draft.changes.filter(c=>c.video||c.photo);
     if(draft.changes.length){quickDraft=draft;persistQuick();}else{win.sessionStorage.removeItem(quickKey());quickDraft=null;}
     renderBoard();renderStatus();
@@ -38,11 +41,16 @@ export function createApp(doc, win, loadSDK) {
     await save('batch',pending.date,batchPayload(controller.board,pending.date,pending.changes,pending),quickDraft.actionId);
     discardQuick();await finishBusiness();message(store.mode==='feishu'&&!businessMessage.includes('已更新')?'登记已保存；'+businessMessage:'登记已统一保存，进度和明细已更新');
   }
+  function reviewProductControl(change,old){
+    const original=change.product??productFromAccount(old),choices=dayProducts(controller.board,quickDraft.date,change.accountId);
+    if(!choices.some(p=>productKey(p)===productKey(original)))choices.unshift(original);
+    return `<label>登记产品<select data-review-product>${choices.map(p=>`<option value="${esc(productKey(p))}" ${productKey(p)===productKey(original)?'selected':''}>${esc(productLabel(p))}${dayProducts(controller.board,quickDraft.date,change.accountId).some(x=>productKey(x)===productKey(p))?'':'（已移出，新增需重新选择）'}</option>`).join('')}</select></label>`;
+  }
   async function reviewQuick(){
     writable();if(!quickDraft)return;await controller.refresh();
     if(quickDraft.actionId&&controller.board.accepted.has(quickDraft.actionId)){discardQuick();await finishBusiness();return;}
     quickReview={date:quickDraft.date,snapshot:config(dayAt(controller.board,quickDraft.date)),basis:batchBasis(controller.board,quickDraft.date),cycleId:cycleIdentity(controller.board,quickDraft.date)};
-    $('quick-review-rows').innerHTML=quickDraft.changes.map(c=>{const old=quickDraft.snapshot.find(r=>r.id===c.accountId),now=quickReview.snapshot.find(r=>r.id===c.accountId),n=now?counts(dayAt(controller.board,quickDraft.date).find(r=>r.id===c.accountId)):{video:0,photo:0};return `<div class="review-row" data-account="${esc(c.accountId)}"><strong>${esc(old?.name??c.accountId)}</strong><p class="muted">原安排：${esc(old?.owner)} / ${esc(old?.product||'未设产品')} / ${esc(old?.shop)}<br>当前：${now?esc(now.owner+' / '+(now.product||'未设产品')+' / '+now.shop):'账号已移出任务，请将该项调整为0'} · 已保存视频${n.video} / 图文${n.photo}</p><div class="two-col"><label>视频变化<input data-delta="video" type="number" step="1" min="-1000000" max="1000000" value="${c.video}" required></label><label>图文变化<input data-delta="photo" type="number" step="1" min="-1000000" max="1000000" value="${c.photo}" required></label></div></div>`;}).join('');
+    $('quick-review-rows').innerHTML=quickDraft.changes.map(c=>{const old=quickDraft.snapshot.find(r=>r.id===c.accountId),now=quickReview.snapshot.find(r=>r.id===c.accountId),n=now?counts(productRows(controller.board,quickDraft.date,c.accountId).find(p=>p.key===productKey(c.product??productFromAccount(old)))??{executions:[]}):{video:0,photo:0};return `<div class="review-row" data-account="${esc(c.accountId)}" data-product-index="${quickDraft.changes.indexOf(c)}"><strong>${esc(old?.name??c.accountId)} · ${esc(c.product?.product??old?.product??'归属未确定')}</strong><p class="muted">原安排：${esc(old?.owner)} / ${esc(old?.product||'未设产品')} / ${esc(old?.shop)}<br>当前：${now?esc(now.owner+' / '+(now.product||'未设产品')+' / '+now.shop):'账号已移出任务，请将该项调整为0'} · 已保存视频${n.video} / 图文${n.photo}</p>${reviewProductControl(c,old)}<div class="two-col"><label>视频变化<input data-delta="video" type="number" step="1" min="-1000000" max="1000000" value="${c.video}" required></label><label>图文变化<input data-delta="photo" type="number" step="1" min="-1000000" max="1000000" value="${c.photo}" required></label></div></div>`;}).join('');
     show($('quick-review-dialog'));renderStatus();
   }
   let members = [], membersError = '', membersBusy = false;
@@ -56,7 +64,7 @@ export function createApp(doc, win, loadSDK) {
   function catalogControl(r,key,attrs) {
     if (store?.mode !== 'feishu') return `<input ${attrs} value="${esc(r[key]??'')}" maxlength="80" ${key==='name'?'required':''}>`;
     const [group,ref,prompt] = catalogKeys[key], items = catalog[group];
-    const match = r[ref] ? items.find(x=>x.id===r[ref]) : items.find(x=>x.name===r[key]);
+    const match = r[ref] ? items.find(x=>x.id===r[ref]) : key==='product'&&attrs.includes('data-entry-field')?null:items.find(x=>x.name===r[key]);
     const legacy = !match && !!r[key];
     return `<select ${attrs} ${key==='name'?'required':''} data-original-name="${esc(r[key]??'')}" data-original-ref="${esc(r[ref]??match?.id??'')}"><option value="">${prompt}</option>${legacy?`<option value="legacy" selected>${esc(r[key])}（原值，资料未建立或已移除）</option>`:''}${items.map(x=>`<option value="${esc(x.id)}" ${x.id===match?.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select>`;
   }
@@ -182,7 +190,7 @@ export function createApp(doc, win, loadSDK) {
     $('add-member').disabled = membersBusy || disabled;
     $('refresh-members').disabled = membersBusy;
     $('quick-save-bar').classList.toggle('hidden',!quickDraft);
-    $('quick-save-note').textContent=quickDraft?(quickCurrent()?`${quickDraft.date} · ${quickDraft.changes.length}个账号待保存；汇总按已保存数量统计`:quickIssues().join('；')+'。暂存保留，请核对后继续。'):'';
+    $('quick-save-note').textContent=quickDraft?(quickCurrent()?`${quickDraft.date} · ${new Set(quickDraft.changes.map(c=>c.accountId)).size}个账号 / ${quickDraft.changes.length}项产品变化待保存；汇总按已保存数量统计`:quickIssues().join('；')+'。暂存保留，请核对后继续。'):'';
     $('quick-save').disabled=disabled||!quickCurrent();$('quick-discard').disabled=!!controller?.busy;
     $('quick-review').classList.toggle('hidden',!quickDraft||quickCurrent());$('quick-review').disabled=disabled;
     $('quick-leave-save').disabled=disabled||!quickCurrent();
@@ -212,7 +220,7 @@ export function createApp(doc, win, loadSDK) {
     const period = p.plan, summary = cycleSummary(b, period);
     const stateLabel = { active: '执行中', ended: '已结束', deleted:'已删除', 'needs-period': '待设置周期', upcoming: '尚未开始', empty: '暂无计划' }[p.state];
     const periodTitle = p.title || (p.from ? p.from + ' 开始的计划' : '周期计划');
-    $('cycle-overview').innerHTML = `<div class="section-header"><div><span class="eyebrow">周期计划</span><h2>${esc(periodTitle)} <span class="badge ${p.state === 'active' ? 'complete' : 'paused'}">${stateLabel}</span></h2><p class="muted">${p.until ? `${p.from} — ${p.until} · 共${summary?.days ?? cycleDays(p.from,p.until)}天` : p.state === 'needs-period' ? '请补充结束日期。' : p.next ? `已安排${p.next.date} — ${p.next.payload.endDate || '待设置结束日期'}` : ''}</p></div><div class="actions">${p.state === 'needs-period' ? `<button class="btn btn-primary" data-configure-cycle="${p.from}">补充计划周期</button>` : `<button class="btn" data-next-cycle="${p.state==='deleted'?'':(p.from ?? '')}">${p.until && p.state!=='deleted' ? '复制为下一周期' : '创建周期计划'}</button>`}</div></div>${summary ? `<div class="cycle-totals"><span>周期视频（已保存） <strong>${summary.video} / ${summary.targetVideo}</strong></span><span>周期图文（已保存） <strong>${summary.photo} / ${summary.targetPhoto}</strong></span><span>已登记 <strong>${summary.recordedDays} / ${summary?.days ?? cycleDays(p.from,p.until)} 天</strong></span><span>周期完成率（已保存） <strong>${summary.target ? summary.pct + '%' : '—'}</strong></span></div><div class="progress"><span style="width:${summary.target ? summary.pct : 0}%"></span></div>` : ''}`;
+    $('cycle-overview').innerHTML = `<div class="section-header"><div><span class="eyebrow">周期计划</span><h2>${esc(periodTitle)} <span class="badge ${p.state === 'active' ? 'complete' : 'paused'}">${stateLabel}</span></h2><p class="muted">${p.until ? `${p.from} — ${p.until} · 共${summary?.days ?? cycleDays(p.from,p.until)}天` : p.state === 'needs-period' ? '请补充结束日期。' : p.next ? `已安排${p.next.date} — ${p.next.payload.endDate || '待设置结束日期'}` : ''}</p></div><div class="actions">${p.state === 'needs-period' ? `<button class="btn btn-primary" data-configure-cycle="${p.from}">补充计划周期</button>` : `<button class="btn" data-next-cycle="${p.state==='deleted'?'':(p.from ?? '')}">${p.until && p.state!=='deleted' ? '复制为下一周期' : '创建周期计划'}</button>`}</div></div>${summary ? `<div class="actions"><button class="btn btn-sm" data-cycle-products="${period.date}">查看周期产品分布</button></div><div class="cycle-totals"><span>周期视频（已保存） <strong>${summary.video} / ${summary.targetVideo}</strong></span><span>周期图文（已保存） <strong>${summary.photo} / ${summary.targetPhoto}</strong></span><span>已登记 <strong>${summary.recordedDays} / ${summary?.days ?? cycleDays(p.from,p.until)} 天</strong></span><span>周期完成率（已保存） <strong>${summary.target ? summary.pct + '%' : '—'}</strong></span></div><div class="progress"><span style="width:${summary.target ? summary.pct : 0}%"></span></div>` : ''}`;
     const stale=date===today()&&p.state==='active'&&b.days.has(date)&&b.days.get(date).planId!==p.plan.id;
     $('day-plan-update').classList.toggle('hidden',!stale);
     const ids=new Set(rows.map(r=>r.id)),detached=[...b.publications.values()].filter(e=>e.date===date&&!b.voids.has(e.id)&&!ids.has(effectivePublication(b,e).accountId)&&effectivePublication(b,e).video+effectivePublication(b,e).photo>0);
@@ -229,19 +237,24 @@ export function createApp(doc, win, loadSDK) {
       [`${s.photo} <small>/ ${s.targetPhoto}</small>`, '已保存图文', `尚缺 ${s.missingPhoto} 条图文${deltaLabel('photo')}`, ''],
       [String(s.missingVideo + s.missingPhoto), '待完成内容', `${rows.length}个账号 · 目标${s.target}条`, '']
     ].map(([value, title, sub, progress]) => `<div class="metric-card"><div class="metric-value">${value}</div><div class="metric-title">${title}</div><div class="metric-sub">${sub}</div>${progress}</div>`).join('');
-    $('board-rows').innerHTML = v.map(r => {
-      const c = counts(r), s = stats([r]), state = !s.active ? 'paused' : s.complete ? 'complete' : 'pending';
-      const step = content => {
-        const change=quickDraft?.date===date?quickDraft.changes.find(x=>x.accountId===r.id)?.[content]??0:0;
-        const mine = c[content]+(quickCurrent()?change:0), label = content === 'video' ? '视频' : '图文';
-        return `<div class="stepper"><button type="button" data-write data-step="-1" data-id="${esc(r.id)}" data-content="${content}" data-blocked="${mine < 1 || date > today()}" aria-label="${esc(r.name+' '+label+'减少1条')}">−</button><output aria-label="${esc(r.name+' '+label+(change&&quickCurrent()?'预计数量':'已保存数量'))}">${mine}</output><button type="button" data-write data-step="1" data-id="${esc(r.id)}" data-content="${content}" data-blocked="${!selectedPerson(r).person || date > today()}" aria-label="${esc(r.name+' '+label+'增加1条')}">＋</button><span class="target">/ ${r[content]}</span></div><small class="quantity-state">已保存 ${c[content]}${change?` · <strong>待保存${change>0?'＋':'−'}${Math.abs(change)}</strong>`:''}</small>`;
-      };
-      return `<tr><td data-label="账号 / 店铺" class="account-cell"><div class="account-name">${esc(r.name)}</div><div class="shop-name">${esc(r.shop || '未设店铺')}</div></td><td data-label="负责人">${store.mode==='feishu'?ownerControl(r,`data-blocked="${date>today()}" data-row-owner="${esc(r.id)}" aria-label="${esc(r.name)}负责人" data-write`):esc(r.owner)}</td><td data-label="产品">${esc(r.product || '待确定')}${r.note ? `<div class="row-note">${esc(r.note)}</div>` : ''}</td><td data-label="视频 / 每天目标" class="count count-cell">${step('video')}</td><td data-label="图文 / 每天目标" class="count count-cell">${step('photo')}</td><td data-label="当天状态"><span class="badge ${state}">${state === 'paused' ? '无任务' : state === 'complete' ? '已达标' : '未达标'}</span><div class="progress"><span style="width:${s.target ? s.pct : 0}%"></span></div></td><td data-label="操作" class="actions-cell"><div class="row-actions"><button class="btn btn-primary btn-sm" data-write data-publish="${esc(r.id)}" data-blocked="${date > today()}">代做</button><button class="btn btn-sm" data-entries="${esc(r.id)}">明细</button></div></td></tr>`;
-    }).join('') || `<tr><td class="empty" colspan="7">${rows.length ? '没有符合筛选的账号' : p.state === 'needs-period' ? '请先补充计划的开始和结束日期。' : '当天没有任务。'}</td></tr>`;
+    $('board-rows').innerHTML = v.flatMap(r => {
+      const total=counts(r),state=stats([r]),products=productRows(b,date,r.id);
+      for(const c of quickDraft?.date===date?quickDraft.changes.filter(c=>c.accountId===r.id):[]){const product=c.product??productFromAccount(quickDraft.snapshot.find(x=>x.id===r.id));if(!products.some(p=>p.key===productKey(product)))products.push({...product,key:productKey(product),arranged:false,executions:[]});}
+      const list=products.length?products:[{...productFromAccount(r),key:productKey(productFromAccount(r)),arranged:false,executions:[]}];
+      return list.map((product,index)=>{
+        const c=counts(product),status=!state.active?'paused':state.complete?'complete':'pending';
+        const step=content=>{
+          const change=quickDraft?.date===date?quickDraft.changes.find(x=>x.accountId===r.id&&productKey(x.product)===product.key)?.[content]??0:0;
+          const preview=c[content]+(quickCurrent()?change:0),label=content==='video'?'视频':'图文';
+          return `<div class="stepper"><button type="button" data-write data-step="-1" data-id="${esc(r.id)}" data-product="${esc(product.key)}" data-content="${content}" data-blocked="${preview<1||date>today()}" aria-label="${esc(r.name+' '+product.product+' '+label+'减少1条')}">−</button><output>${preview}</output><button type="button" data-write data-step="1" data-id="${esc(r.id)}" data-product="${esc(product.key)}" data-content="${content}" data-blocked="${!product.arranged||!selectedPerson(r).person||date>today()}" aria-label="${esc(r.name+' '+product.product+' '+label+'增加1条')}">＋</button>${list.length===1?`<span class="target">/ ${r[content]}</span>`:''}</div><small class="quantity-state">已保存 ${c[content]}${change?` · <strong>待保存${change>0?'＋':'−'}${Math.abs(change)}</strong>`:''}</small>`;
+        };
+        return `<tr class="${index?'product-continuation':''}"><td data-label="账号 / 店铺" class="account-cell"><div class="account-name">${esc(r.name)}</div>${index?'':`<div class="shop-name">${esc(r.shop||'未设店铺')}</div><small>账号合计：视频 ${total.video}/${r.video} · 图文 ${total.photo}/${r.photo}</small>`}</td><td data-label="负责人">${index?esc(r.owner):store.mode==='feishu'?ownerControl(r,`data-blocked="${date>today()}" data-row-owner="${esc(r.id)}" aria-label="${esc(r.name)}负责人" data-write`):esc(r.owner)}</td><td data-label="登记产品"><strong>${esc(productLabel(product))}</strong>${!product.arranged?'<small class="quantity-state">已移出安排 · 已保存记录保留</small>':''}${index?'':`<div><button class="text-button" data-write data-products="${esc(r.id)}">调整当天产品</button></div>`}${r.note&&!index?`<div class="row-note">${esc(r.note)}</div>`:''}</td><td data-label="产品视频" class="count count-cell">${step('video')}</td><td data-label="产品图文" class="count count-cell">${step('photo')}</td><td data-label="账号当天状态">${index?'':`<span class="badge ${status}">${status==='paused'?'无任务':status==='complete'?'已达标':'未达标'}</span><div class="progress"><span style="width:${state.target?state.pct:0}%"></span></div>`}</td><td data-label="操作" class="actions-cell"><div class="row-actions"><button class="btn btn-sm" data-write data-publish="${esc(r.id)}" data-product="${esc(product.key)}" data-blocked="${!product.arranged||date>today()}">代做</button><button class="btn btn-sm" data-entries="${esc(r.id)}" data-product="${esc(product.key)}">明细</button></div></td></tr>`;
+      });
+    }).join('') || `<tr><td class="empty" colspan="7">${rows.length?'没有符合筛选的账号':'当天没有任务。'}</td></tr>`;
     $('contributions').innerHTML = people(savedRows).map(p => `<div class="person-card"><strong>${esc(p.person)}</strong><span>视频 ${p.video} · 图文 ${p.photo}</span></div>`).join('') || '<p class="muted">当天还没有已保存的发布登记。</p>';
     const names = [...rows.map(r => r.owner), ...people(rows).map(p => p.person)];
     $('people-list').innerHTML = [...new Set(names)].map(p => `<option value="${esc(p)}">`).join('');
-    if(focus)[...doc.querySelectorAll('[data-step]')].find(el=>el.dataset.step===focus.step&&el.dataset.id===focus.id&&el.dataset.content===focus.content)?.focus({preventScroll:true});
+    if(focus)[...doc.querySelectorAll('[data-step]')].find(el=>el.dataset.step===focus.step&&el.dataset.id===focus.id&&el.dataset.content===focus.content&&el.dataset.product===focus.product)?.focus({preventScroll:true});
   }
   function planRow(r) {
     return `<tr data-id="${esc(r.id)}" data-original-id="${esc(r.id)}">${[['name','账号名称'],['shop','店铺'],['owner','负责人'],['product','发布产品'],['video','每天视频目标'],['photo','每天图文目标']].map(([key,label]) => `<td data-label="${label}">${key==='owner'?ownerControl(r,`data-field="owner" aria-label="负责人"`):catalogKeys[key]?catalogControl(r,key,`data-field="${key}" aria-label="${label}"`):`<input data-field="${key}" value="${esc(r[key])}" type="number" min="0" max="10000" step="1" required aria-label="${label}">`}</td>`).join('')}<td data-label="操作" class="actions-cell"><button type="button" class="text-button danger" data-remove="${esc(r.id)}" data-write>删除账号</button></td></tr>`;
@@ -297,12 +310,12 @@ export function createApp(doc, win, loadSDK) {
   }
   function renderEntries() {
     const b = controller.board, r = dayAt(b, date).find(r => r.id === entriesAccount);
-    $('entries-title').textContent = `${date} · ${r?.name??'当天登记明细'}`;
-    const entries = [...b.publications.values()].filter(e => e.date === date && (!entriesAccount||effectivePublication(b,e).accountId===entriesAccount) && !b.deletedEntries.has(e.id)).reverse();
+    $('entries-title').textContent = `${date} · ${r?.name??'当天登记明细'}${entriesProduct?' · '+(productRows(b,date,entriesAccount).find(p=>p.key===entriesProduct)?.product||'未确定产品'):''}`;
+    const entries = [...b.publications.values()].filter(e => e.date === date && (!entriesAccount||effectivePublication(b,e).accountId===entriesAccount) && (!entriesProduct||productKey(publicationProduct(b,e))===entriesProduct) && !b.deletedEntries.has(e.id)).reverse();
     $('entries').innerHTML = entries.map(e => {
       const voided = b.voids.has(e.id), why = b.actions.filter(a => a.kind === 'void' && a.payload.target === e.id && b.accepted.has(a.id)).map(a => a.payload.reason).join('；');
       const current = effectivePublication(b, e), reduced = b.reductions.get(e.id);
-      return `<div class="entry ${voided ? 'voided' : ''}"><div><p><strong>${esc(current.account?.name??current.accountId)}</strong> · ${delegatedPublication(current)?'代做登记':'本人登记'} · 视频${voided ? 0 : current.video} · 图文${voided ? 0 : current.photo}${e.imported ? ' · 历史导入' : ''}</p><p class="muted">登记时安排：${current.account?esc((current.account.shop||'未记录店铺')+' · '+(current.account.product||'未记录计划产品')+' · 负责人 '+current.account.owner):'历史字段缺失，未回填当前计划'}<br>完成人：${esc(current.person)}</p><p class="muted">${esc(current.note)}</p>${reduced ? `<p class="muted">数量更正：视频${reduced.video}、图文${reduced.photo}</p>` : ''}${b.edits.has(e.id)?'<p class="muted">已修改登记</p>':''}<p class="muted">${new Date(e.at).toLocaleString('zh-CN')}${voided ? ' · 已撤销：' + esc(why) : ''}</p></div><div class="row-actions">${!voided?`<button class="btn btn-sm" data-write data-edit-entry="${esc(e.id)}">修改登记</button>`:''}<button class="btn btn-sm danger" data-write data-delete-entry="${esc(e.id)}">删除记录</button></div></div>`;
+      return `<div class="entry ${voided ? 'voided' : ''}"><div><p><strong>${esc(current.account?.name??current.accountId)}</strong> · ${delegatedPublication(current)?'代做登记':'本人登记'} · 视频${voided ? 0 : current.video} · 图文${voided ? 0 : current.photo}${e.imported ? ' · 历史导入' : ''}</p><p><strong>登记产品：${esc(productLabel(publicationProduct(b,e)))}</strong></p><p class="muted">登记时安排：${current.account?esc((current.account.shop||'未记录店铺')+' · 周期计划 '+(current.account.product||'未记录计划产品')+' · 负责人 '+current.account.owner):'历史字段缺失，未回填当前计划'}<br>完成人：${esc(current.person)}</p><p class="muted">${esc(current.note)}</p>${reduced ? `<p class="muted">数量更正：视频${reduced.video}、图文${reduced.photo}</p>` : ''}${b.edits.has(e.id)?'<p class="muted">已修改登记</p>':''}<p class="muted">${new Date(e.at).toLocaleString('zh-CN')}${voided ? ' · 已撤销：' + esc(why) : ''}</p></div><div class="row-actions">${!voided?`<button class="btn btn-sm" data-write data-edit-entry="${esc(e.id)}">修改登记</button>`:''}<button class="btn btn-sm danger" data-write data-delete-entry="${esc(e.id)}">删除记录</button></div></div>`;
     }).join('') || '<p class="muted">还没有发布登记。</p>';
   }
   function render() {
@@ -310,7 +323,7 @@ export function createApp(doc, win, loadSDK) {
     if (followToday) date = today();
     $('onboarding').classList.add('hidden'); $('workspace').classList.remove('hidden');
     renderBoard(); renderHistory();
-    $('versions').innerHTML = [...controller.board.plans.values()].sort((a, b) => b.date.localeCompare(a.date)).map(p => `<div class="version-card"><button class="btn" data-plan-date="${p.date}">${esc(p.payload.title || '周期计划')}<small>${p.date} — ${p.payload.endDate ?? '待设置结束日期'}<br>${p.payload.accounts.length}个账号 · ${!p.payload.endDate ? '待设置周期' : today() < p.date ? '未开始' : today() > p.payload.endDate ? '已结束' : '执行中'}</small></button><button class="text-button danger" data-write data-delete-plan="${p.date}">删除周期</button></div>`).join('') || '<p class="muted">尚未保存周期计划。</p>';
+    $('versions').innerHTML = [...controller.board.plans.values()].sort((a, b) => b.date.localeCompare(a.date)).map(p => `<div class="version-card"><button class="btn" data-plan-date="${p.date}">${esc(p.payload.title || '周期计划')}<small>${p.date} — ${p.payload.endDate ?? '待设置结束日期'}<br>${p.payload.accounts.length}个账号 · ${!p.payload.endDate ? '待设置周期' : today() < p.date ? '未开始' : today() > p.payload.endDate ? '已结束' : '执行中'}</small></button><button class="text-button" data-cycle-products="${p.date}">产品分布</button><button class="text-button danger" data-write data-delete-plan="${p.date}">删除周期</button></div>`).join('') || '<p class="muted">尚未保存周期计划。</p>';
     if (tab === 'plan' && !planLoaded) loadPlan();
     if ($('entries-dialog').open) renderEntries();
     renderStatus();
@@ -322,14 +335,46 @@ export function createApp(doc, win, loadSDK) {
     for (const t of ['board', 'plan', 'history']) { $('tab-' + t).classList.toggle('hidden', t !== tab); doc.querySelector(`[data-tab="${t}"]`).classList.toggle('active', t === tab); }
     if (controller) render();
   }
+  function productLabel(p){return p.productRef?(catalog.products.find(x=>x.id===p.productRef)?.name??p.product??'未确定产品'):(p.product?'归属未确定（'+p.product+'）':'归属未确定');}
+  function openProducts(id){
+    if(askQuick(()=>openProducts(id)))return;writable();
+    const r=row(id);productEditing={date,account:config([r])[0],accountId:id,cycleId:cycleIdentity(controller.board,date),expected:dayProducts(controller.board,date,id),products:dayProducts(controller.board,date,id)};productsDirty=false;
+    $('products-title').textContent=date+' · '+r.name+' · 当天产品';
+    $('product-choice').innerHTML=store.mode==='feishu'?'<option value="">选择产品资料</option>'+catalog.products.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${catalog.products.filter(x=>x.name===p.name).length>1?' · '+esc(p.id.slice(-6)):''}</option>`).join(''):'';
+    $('product-choice').hidden=store.mode!=='feishu';$('product-demo-name').hidden=store.mode==='feishu';$('product-demo-name').value='';
+    renderProductChoices();show($('products-dialog'));renderStatus();
+  }
+  function renderProductChoices(){
+    $('products-list').innerHTML=productEditing.products.map((p,i)=>`<div class="entry"><strong>${esc(productLabel(p))}</strong><button type="button" class="text-button" data-write data-remove-product="${i}">移出当天安排</button></div>`).join('')||'<p class="muted">当天暂无准备登记的产品；已保存发布仍保留。</p>';
+  }
+  function renderCycleProducts(plan){
+    if(!plan)throw Error('周期不存在');$('cycle-products-title').textContent=(plan.payload.title||'周期计划')+' · '+plan.date+' — '+plan.payload.endDate;
+    $('cycle-products').innerHTML=cycleAccounts(controller.board,plan).map(r=>{
+      const s=accountCycleSummary(controller.board,plan,r),products=cycleProductRows(controller.board,plan,r.id),original=originalCycleProduct(controller.board,plan,r.id);
+      return `<section class="distribution-account"><h3>${esc(r.name)}</h3><p>周期原定产品：${esc(productLabel(original))}</p><p>视频 ${s.video}/${s.targetVideo} · 缺 ${s.missingVideo}；图文 ${s.photo}/${s.targetPhoto} · 缺 ${s.missingPhoto}</p>${products.map(p=>`<details><summary>${esc(productLabel(p))} · 视频 ${p.video} · 图文 ${p.photo}</summary><div>${p.dates.map(d=>`<button class="btn btn-sm" data-product-date="${d.date}" data-account="${esc(r.id)}" data-product="${esc(p.key)}">${d.date} · 视频 ${d.video} / 图文 ${d.photo} · 查看明细</button>`).join('')}</div></details>`).join('')||'<p class="muted">尚无有效发布登记。</p>'}</section>`;
+    }).join('');
+  }
+  function openProductDate(button){date=button.dataset.productDate;followToday=date===today();entriesAccount=button.dataset.account;entriesProduct=button.dataset.product;close($('cycle-products-dialog'));switchTab('board');renderEntries();show($('entries-dialog'));renderStatus();}
+  $('products-list').onclick=e=>{const b=e.target.closest('[data-remove-product]');if(!b)return;productEditing.products.splice(Number(b.dataset.removeProduct),1);productsDirty=true;renderProductChoices();};
+  $('product-add').onclick=run(()=>{
+    if(!productEditing)throw Error('请重新打开当天产品');
+    let p;if(store.mode==='feishu'){if(catalogError)throw Error(catalogError);const item=catalog.products.find(x=>x.id===$('product-choice').value);if(!item)throw Error('请选择已有产品资料');p={product:item.name,productRef:item.id};}
+    else {const name=$('product-demo-name').value.trim();if(!name)throw Error('请填写演示产品名称');p={product:name,productRef:'demo-product:'+encodeURIComponent(name).replace(/%/g,'-')};}
+    if(productEditing.products.some(x=>productKey(x)===productKey(p))){message('该产品已在当天安排中');return;}
+    if(productEditing.products.length>=30)throw Error('当天每个账号最多30个产品');productEditing.products.push(productSnapshot(p));productsDirty=true;renderProductChoices();
+  });
+  $('products-save').onclick=run(async()=>{writable();if(!productEditing)return;productEditing.actionId??=crypto.randomUUID();await save('products',productEditing.date,productEditing,productEditing.actionId);productsDirty=false;productEditing=null;close($('products-dialog'));render();await finishBusiness();message('当天产品安排已保存，周期计划和已有发布保留');});
+  function cancelProducts(){if(productsDirty&&!win.confirm('当天产品安排尚未保存，放弃修改？'))return false;productsDirty=false;productEditing=null;close($('products-dialog'));return true;}
+  $('products-dialog').addEventListener('cancel',e=>{e.preventDefault();cancelProducts();});
   function row(id) { const r = dayAt(controller.board, date).find(r => r.id === id); if (!r) throw Error('该账号不在当前日期'); return r; }
   function snapshot() { return config(dayAt(controller.board, date)); }
-  function openPublish(id) {
-    if(askQuick(()=>openPublish(id)))return;
+  function openPublish(id,key) {
+    if(askQuick(()=>openPublish(id,key)))return;
     writable(); if (date > today()) throw Error('未来日期尚未开始，请到当天再登记'); const r = row(id);
-    editing = { id, date, snapshot: snapshot(), head:r.head }; $('publish-form').reset(); registrationDirty=false;
+    const product=productRows(controller.board,date,id).find(p=>p.key===key)??productRows(controller.board,date,id)[0];if(!product?.arranged)throw Error('请先将产品加回当天安排');
+    editing = { id, date, product:productSnapshot(product), snapshot: snapshot(), head:r.head }; $('publish-form').reset(); registrationDirty=false;
     $('entry-arrangement').classList.add('hidden');$('correct-arrangement').checked=false;$('entry-details').querySelectorAll('input,select').forEach(input=>input.disabled=true);
-    $('publish-title').textContent = `登记代做 · ${date} · ${r.name}`;
+    $('publish-title').textContent = `登记代做 · ${date} · ${r.name} · ${editing.product.product||'未确定产品'}`;
     $('publish-person-control').innerHTML=ownerControl({owner:'',ownerId:''},'name="person" aria-label="代做人"').replaceAll('选择负责人','选择代做人');
     $('publish-person-row').hidden=false;$('publish-person-label').textContent='代做人';$('publish-submit').textContent='保存代做登记';show($('publish-dialog'));
   }
@@ -337,19 +382,19 @@ export function createApp(doc, win, loadSDK) {
     if(askQuick(()=>openEntryEdit(id)))return;
     writable();const entry=controller.board.publications.get(id);
     if(!entry||controller.board.voids.has(id)||controller.board.deletedEntries.has(id))throw Error('记录已被删除或撤销，请重新打开明细');
-    const current=publicationState(controller.board,entry),effective=effectivePublication(controller.board,entry);editing={target:id,date:entry.date,expected:current,expectedAccount:clone(effective.account),delegate:delegatedPublication(effective)};registrationDirty=false;
+    const current=publicationState(controller.board,entry),effective=effectivePublication(controller.board,entry);editing={target:id,date:entry.date,expected:current,expectedAccount:clone(effective.account),expectedProduct:publicationProduct(controller.board,entry),delegate:delegatedPublication(effective)};registrationDirty=false;
     $('publish-form').reset();$('publish-title').textContent=`修改登记 · ${entry.date} · ${entry.account?.name??'账号'}`;
     $('publish-person-row').hidden=!editing.delegate;$('publish-person-label').textContent='代做人';$('publish-person-control').innerHTML=editing.delegate?ownerControl({owner:current.person,ownerId:current.personId},'name="person" aria-label="代做人"').replaceAll('选择负责人','选择代做人'):'';
     for(const key of ['video','photo','note'])$('publish-form').elements.namedItem(key).value=current[key];
     $('entry-arrangement').classList.remove('hidden');$('correct-arrangement').checked=false;$('entry-arrangement-fields').hidden=true;
     const choices=new Map(dayAt(controller.board,entry.date).map(r=>[r.id,config([r])[0]]));if(effective.account)choices.set(effective.accountId,effective.account);
     editing.accounts=[...choices.values()];$('entry-account').innerHTML=editing.accounts.map(r=>`<option value="${esc(r.id)}" ${r.id===effective.accountId?'selected':''}>${esc(r.name)}</option>`).join('');$('entry-account').value=effective.accountId;
-    renderEntryArrangement(effective.account);
+    renderEntryArrangement(effective.account,editing.expectedProduct);
     $('publish-submit').textContent='保存修改';show($('publish-dialog'));
   }
-  function renderEntryArrangement(account){
+  function renderEntryArrangement(account,product=editing?.expectedProduct){
     if(!account){$('entry-details').textContent='历史安排缺失，请保留原归属，先核对来源';return;}
-    $('entry-details').innerHTML=['shop','product'].map(key=>`<label>${key==='shop'?'店铺':'登记时计划产品'}${catalogControl(account,key,`data-entry-field="${key}" aria-label="纠错${key==='shop'?'店铺':'计划产品'}"`)}</label>`).join('')+`<label>登记时负责人${ownerControl(account,'data-entry-field="owner" aria-label="纠错负责人"')}</label>`;
+    $('entry-details').innerHTML=['shop','product'].map(key=>`<label>${key==='shop'?'店铺':'本条登记产品'}${catalogControl(key==='product'?{...account,...product}:account,key,`data-entry-field="${key}" aria-label="纠错${key==='shop'?'店铺':'计划产品'}"`)}</label>`).join('')+`<label>登记时负责人${ownerControl(account,'data-entry-field="owner" aria-label="纠错负责人"')}</label>`;
     restoreRenderedChoices($('entry-details'));
     $('entry-details').querySelectorAll('input,select').forEach(input=>input.disabled=!$('correct-arrangement').checked);
   }
@@ -392,7 +437,7 @@ export function createApp(doc, win, loadSDK) {
     offStore?.(); win.clearInterval(pollTimer); win.clearTimeout(refreshTimer);
     controller = fresh; store = next; planLoaded = false; planDirty = false; businessMessage = ''; lastBusinessRevision = ''; deleteTarget=null; members = []; memberRows=[];membersError = '';catalog={accounts:[],shops:[],products:[]};catalogError='';quickDraft=null;
     const cachedQuick=win.sessionStorage.getItem(quickKey())??(!win.sessionStorage.getItem(quickKey()+':legacy-seen')?win.localStorage.getItem(quickKey()):null);
-    if(cachedQuick){const cached=JSON.parse(cachedQuick);if(!validDate(cached.date)||!Array.isArray(cached.changes)||!Array.isArray(cached.snapshot))throw Error('暂存登记格式无效，请核对本地草稿');quickDraft={...cached,...(cached.v!==7?{requiresReview:true}:{})};persistQuick();win.sessionStorage.setItem(quickKey()+':legacy-seen','true');date=cached.date;followToday=date===today();}
+    if(cachedQuick){const cached=JSON.parse(cachedQuick);if(!validDate(cached.date)||!Array.isArray(cached.changes)||!Array.isArray(cached.snapshot))throw Error('暂存登记格式无效，请核对本地草稿');quickDraft={...cached,...(cached.v!==8?{requiresReview:true}:{})};persistQuick();win.sessionStorage.setItem(quickKey()+':legacy-seen','true');date=cached.date;followToday=date===today();}
     offStore = store.subscribe(() => {
       win.clearTimeout(refreshTimer);
       refreshTimer = win.setTimeout(() => { if (!controller.busy && !importing) controller.refresh().catch(() => {}); }, 350);
@@ -497,7 +542,7 @@ export function createApp(doc, win, loadSDK) {
   $('refresh-members').onclick = run(refreshMembers);
   $('manage-members').onclick = run(async () => { await store.openMembers(); });
   $('plan-add-member').onclick=$('add-member').onclick;$('plan-refresh-members').onclick=$('refresh-members').onclick;$('plan-manage-members').onclick=$('manage-members').onclick;
-  $('all-entries').onclick=()=>{entriesAccount=null;renderEntries();show($('entries-dialog'));renderStatus();};
+  $('all-entries').onclick=()=>{entriesAccount=null;entriesProduct=null;renderEntries();show($('entries-dialog'));renderStatus();};
   $('apply-day-plan').onclick=run(async()=>{writable();const p=planAt(controller.board,today()).plan;if(!p?.payload.endDate)throw Error('请先保存周期计划');await save('plan',p.date,planPayload(p.payload.accounts,p));date=today();followToday=true;render();await finishBusiness();message('今天已同步最新计划，原有发布登记保留');});
   $('retry').onclick = run(async () => {
     const p = controller.pending; if (!p) return;
@@ -507,6 +552,7 @@ export function createApp(doc, win, loadSDK) {
       else{discardQuick();await finishBusiness();}
     }
     registrationDirty=false;editing=null;close($('publish-dialog'));
+    if(productEditing?.actionId===p.id){productsDirty=false;productEditing=null;close($('products-dialog'));await finishBusiness();}
     message(result === 'restored' ? '原操作已随备份恢复，恢复后的数量保留；旧请求迟到不会重复登记，请核对明细。' : result === 'saved' ? '原请求已在停止前生效，数量保留；请核对明细。' : result === 'stopped' ? '停止已确认，原请求未生效，迟到也不会生效。' : '上次保存已确认，请核对明细');
   });
   $('stop-pending').onclick = run(async () => {
@@ -519,20 +565,23 @@ export function createApp(doc, win, loadSDK) {
   });
   doc.addEventListener('click', run(async e => {
     const b = e.target.closest('button'); if (!b || b.disabled) return;
-    if (b.hasAttribute('data-close')) { const dialog=b.closest('dialog'); if(dialog.id==='publish-dialog')cancelRegistration();else close(dialog); }
+    if (b.hasAttribute('data-close')) { const dialog=b.closest('dialog'); if(dialog.id==='publish-dialog')cancelRegistration();else if(dialog.id==='products-dialog')cancelProducts();else close(dialog); }
     if (b.dataset.tab) switchTab(b.dataset.tab);
-    if (b.dataset.publish) openPublish(b.dataset.publish);
+    if (b.dataset.publish) openPublish(b.dataset.publish,b.dataset.product);
+    if(b.dataset.products)openProducts(b.dataset.products);
+    if(b.dataset.cycleProducts){renderCycleProducts(controller.board.plans.get(b.dataset.cycleProducts));show($('cycle-products-dialog'));}
+    if(b.dataset.productDate){if(askQuick(()=>openProductDate(b)))return;openProductDate(b);}
     if (b.dataset.step) {
       if (date > today()) throw Error('未来日期尚未开始，请到当天再登记');
       writable(); const r = row(b.dataset.id), selected = selectedPerson(r), person = selected.person, content = b.dataset.content;
       if(b.dataset.step==='1'&&!person)throw Error('请先从飞书成员中选择账号负责人');
       const member=selected;
-      stageQuantity(r.id,content,Number(b.dataset.step));
+      stageQuantity(r.id,content,Number(b.dataset.step),b.dataset.product);
     }
     if (b.dataset.editEntry) openEntryEdit(b.dataset.editEntry);
     if (b.dataset.business) { if (!store?.openBusiness) return; await store.openBusiness(b.dataset.business); close($('business-dialog')); }
-    if (b.dataset.entries) { entriesAccount = b.dataset.entries; renderEntries(); show($('entries-dialog')); renderStatus(); }
-    if(b.dataset.deleteEntry){const entry=controller.board.publications.get(b.dataset.deleteEntry);if(!entry)throw Error('记录已变化，请刷新');confirmDelete({type:'publication',entry,expected:publicationState(controller.board,entry),expectedAccount:clone(effectivePublication(controller.board,entry).account)},'删除这条登记？',`${entry.date} · ${effectivePublication(controller.board,entry).account?.name??'账号'} · 视频${effectivePublication(controller.board,entry).video} / 图文${effectivePublication(controller.board,entry).photo}。确认后从完成数量中扣除，并删除飞书发布明细中的对应行。操作审计保留，不参与统计。`);}
+    if (b.dataset.entries) { entriesAccount = b.dataset.entries;entriesProduct=b.dataset.product??null; renderEntries(); show($('entries-dialog')); renderStatus(); }
+    if(b.dataset.deleteEntry){const entry=controller.board.publications.get(b.dataset.deleteEntry);if(!entry)throw Error('记录已变化，请刷新');confirmDelete({type:'publication',entry,expected:publicationState(controller.board,entry),expectedAccount:clone(effectivePublication(controller.board,entry).account),expectedProduct:publicationProduct(controller.board,entry)},'删除这条登记？',`${entry.date} · ${effectivePublication(controller.board,entry).account?.name??'账号'} · 视频${effectivePublication(controller.board,entry).video} / 图文${effectivePublication(controller.board,entry).photo}。确认后从完成数量中扣除，并删除飞书发布明细中的对应行。操作审计保留，不参与统计。`);}
     if(b.dataset.deletePlan){const p=controller.board.plans.get(b.dataset.deletePlan);if(!p)throw Error('计划已变化');const entries=[...controller.board.publications.values()].filter(e=>e.date>=p.date&&e.date<=(p.payload.endDate??p.date)&&!controller.board.deletedEntries.has(e.id)).map(e=>e.id);confirmDelete({type:'plan',plan:p,expected:controller.board.planHead,heads:dayHeads(controller.board,today()),entries},'删除这个周期及其登记？',`${p.payload.title||'周期计划'} · ${p.date}至${p.payload.endDate??'未设结束日期'} · ${p.payload.accounts.length}个账号、${entries.length}条登记。确认后删除本周期的计划、周期进度、每日进度和发布明细；不影响其他周期。`);}
     if(b.dataset.restoreDay){await save('delete',date,{type:'restore-day-account',target:b.dataset.restoreDay,expectedHeads:dayHeads(controller.board,date)});render();await finishBusiness();message('当天任务已恢复，已删除的错误登记不会恢复，请重新登记实际数量');}
     if (b.dataset.remove) { writable(); b.closest('tr').remove(); planDirty = true; planTotal(); message('账号已从草稿移除；点击保存发布计划后同步飞书。已有发布登记保留。'); }
@@ -556,11 +605,12 @@ export function createApp(doc, win, loadSDK) {
   $('quick-review').onclick=run(reviewQuick);
   $('quick-review-form').onsubmit=run(async e=>{
     e.preventDefault();writable();if(!quickReview||!quickDraft)throw Error('请重新核对暂存');
-    const changes=[...$('quick-review-rows').children].map(el=>{const id=el.dataset.account,r=quickReview.snapshot.find(r=>r.id===id),values=Object.fromEntries([...el.querySelectorAll('[data-delta]')].map(input=>[input.dataset.delta,Number(input.value)]));return {accountId:id,person:r?.owner??'已移出',...(r?.ownerId?{personId:r.ownerId}:{}),...values};}).filter(c=>c.video||c.photo);
+    let changes=[...$('quick-review-rows').children].map(el=>{const id=el.dataset.account,r=quickReview.snapshot.find(r=>r.id===id),values=Object.fromEntries([...el.querySelectorAll('[data-delta]')].map(input=>[input.dataset.delta,Number(input.value)]));return {accountId:id,product:productSnapshot([...dayProducts(controller.board,quickReview.date,id),quickDraft.changes[Number(el.dataset.productIndex)].product??productFromAccount(quickDraft.snapshot.find(r=>r.id===id))].find(p=>productKey(p)===el.querySelector('[data-review-product]').value)),person:r?.owner??'已移出',...(r?.ownerId?{personId:r.ownerId}:{}),...values};}).filter(c=>c.video||c.photo);
     await controller.refresh();
+    const merged=new Map();for(const c of changes){const key=c.accountId+'|'+productKey(c.product),prior=merged.get(key);if(prior){prior.video+=c.video;prior.photo+=c.photo;}else merged.set(key,c);}changes=[...merged.values()].filter(c=>c.video||c.photo);
     const payload=batchPayload(controller.board,quickReview.date,changes,quickReview),issues=batchConflicts(controller.board,quickReview.date,payload);
     if(issues.length)throw Error(issues.join('；')+'。尚未替换原输入，请重新核对');
-    if(changes.length){quickDraft={v:7,...quickReview,changes};persistQuick();}else discardQuick();
+    if(changes.length){quickDraft={v:8,...quickReview,changes};persistQuick();}else discardQuick();
     quickReview=null;close($('quick-review-dialog'));render();message('核对后的变化已暂存，点击保存登记后生效');
   });
   $('quick-discard').onclick=()=>{if(win.confirm('放弃本次未保存的＋／−修改？飞书中的已保存登记保留。'))discardQuick();};
@@ -605,15 +655,15 @@ export function createApp(doc, win, loadSDK) {
     const person=editing.target&&!editing.delegate?{person:editing.expected.person,...(editing.expected.personId?{personId:editing.expected.personId}:{})}:publicationPerson(data.person),values={...person,video:Number(data.video),photo:Number(data.photo),note:data.note};
     await controller.refresh();
     if(editing.target){
-      let account;
-      if($('correct-arrangement').checked){account=clone(editing.accounts.find(r=>r.id===$('entry-account').value));if(!account)throw Error('请选择该日期的真实账号');for(const input of $('entry-details').querySelectorAll('[data-entry-field]'))Object.assign(account,input.dataset.entryField==='owner'?readOwner(input):readCatalog(input,input.dataset.entryField));account=config([account])[0];}
-      await save('edit',editing.date,{target:editing.target,expected:editing.expected,expectedAccount:editing.expectedAccount,...(account?{account}:{}),...values});
+      let account,product;
+      if($('correct-arrangement').checked){account=clone(editing.accounts.find(r=>r.id===$('entry-account').value));if(!account)throw Error('请选择该日期的真实账号');for(const input of $('entry-details').querySelectorAll('[data-entry-field]')){if(input.dataset.entryField==='product'){if(store.mode==='feishu')product=readCatalog(input,'product');else{const name=input.value.trim(),matches=dayProducts(controller.board,editing.date,account.id).filter(p=>p.product===name);product=name===editing.expectedProduct.product?editing.expectedProduct:matches.length===1?matches[0]:{product:name,...(name?{productRef:'demo-product:'+encodeURIComponent(name).replace(/%/g,'-')}:{})};}}else Object.assign(account,input.dataset.entryField==='owner'?readOwner(input):readCatalog(input,input.dataset.entryField));}account=config([account])[0];}
+      await save('edit',editing.date,{target:editing.target,expected:editing.expected,expectedAccount:editing.expectedAccount,expectedProduct:editing.expectedProduct,...(account?{account,product:productSnapshot(product)}:{}),...values});
     }
     else {
       if(editing.date>today())throw Error('未来日期尚未开始');
       const current=dayAt(controller.board,editing.date).find(r=>r.id===editing.id);
       if(!current||taskIdentity(current)!==taskIdentity(editing.snapshot.find(r=>r.id===editing.id)))throw Error('该账号安排已变化，代做输入保留，请核对安排后再登记');
-      await save('publish',editing.date,{snapshot:editing.snapshot,accountId:editing.id,...values});
+      await save('publish',editing.date,{snapshot:editing.snapshot,accountId:editing.id,product:editing.product,...values});
     }
     const updated=!!editing.target;registrationDirty=false;editing=null;close($('publish-dialog'));render();await finishBusiness();
     message(store.mode==='feishu'&&!businessMessage.includes('已更新')?'登记已保存；'+businessMessage:updated?'登记已修改，进度和明细已更新':'代做已登记，完成数量和明细已更新');
@@ -621,7 +671,7 @@ export function createApp(doc, win, loadSDK) {
   $('delete-plan').onclick=()=>{const button=doc.createElement('button');button.dataset.deletePlan=$('plan-date').value;doc.body.append(button);button.click();button.remove();};
   $('delete-confirm').onclick=run(async()=>{
     writable();const target=deleteTarget;if(!target)return;
-    if(target.type==='publication')await save('delete',target.entry.date,{type:'publication',target:target.entry.id,expected:target.expected,expectedAccount:target.expectedAccount,reason:'用户确认删除错误登记'});
+    if(target.type==='publication')await save('delete',target.entry.date,{type:'publication',target:target.entry.id,expected:target.expected,expectedAccount:target.expectedAccount,expectedProduct:target.expectedProduct,reason:'用户确认删除错误登记'});
     else if(target.type==='plan')await save('delete',target.plan.date,{type:'plan',target:target.plan.id,expected:target.expected,applyDate:today(),applyHeads:target.heads,cascade:true,entries:target.entries});
     else{const payload=planPayload(config(target.plan.payload.accounts.filter(r=>r.id!==target.accountId)),target.plan);payload.expected=target.expected;payload.applyHeads=target.heads;await save('plan',target.plan.date,payload);}
     close($('delete-dialog'));deleteTarget=null;if(target.type!=='publication'){planLoaded=false;planDirty=false;}render();await finishBusiness();message(store.mode==='feishu'?`已删除并停止计数；${businessMessage}`:'已删除，错误登记不再计入');
@@ -657,7 +707,7 @@ export function createApp(doc, win, loadSDK) {
   });
   $('report').onclick = () => { $('report-text').value = report(controller.board, date); show($('report-dialog')); };
   $('copy-report').onclick = run(async () => { try { await win.navigator.clipboard.writeText($('report-text').value); message('日报已复制'); } catch { $('report-text').select(); message('浏览器未允许自动复制，请复制已选中的日报文字'); } });
-  win.addEventListener('beforeunload', e => { if (planDirty || quickDraft || registrationDirty || controller?.pending || importing) { e.preventDefault(); e.returnValue = ''; } });
+  win.addEventListener('beforeunload', e => { if (planDirty || quickDraft || registrationDirty || productsDirty || controller?.pending || importing) { e.preventDefault(); e.returnValue = ''; } });
   const storageChanged = e => { if (controller && (e.key?.startsWith(controller.pendingKey) || e.key === pendingMigrationKey())) renderStatus(); };
   win.addEventListener('storage', storageChanged);
   const ready = connect();

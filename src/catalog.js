@@ -47,7 +47,7 @@ export function createCatalogStore({ bitable, FieldType }) {
           const name = label(row.fields[fields.name.id], def.name);
           if (!name) continue; // Empty grid rows are drafts, not selectable business records.
           if (!identity(row.recordId) || seen.has(row.recordId)) throw Error(def.name + '记录标识重复或无效');
-          if (names.has(name)) throw Error(def.name + '存在同名记录，请在飞书区分名称后刷新');
+          if (def.key!=='products' && names.has(name)) throw Error(def.name + '存在同名记录，请在飞书区分名称后刷新');
           seen.add(row.recordId); names.add(name);
           const item = { id: row.recordId, name };
           if (def.key === 'accounts') {
